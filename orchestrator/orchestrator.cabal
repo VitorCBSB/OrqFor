@@ -1,0 +1,18 @@
+cabal-version: 3.0
+name:          Orchestrator
+version:       0.1.0.0
+author:        Vitor Coimbra
+build-type:    Simple
+
+executable orchestrator
+    main-is: Main.hs
+    hs-source-dirs: app, src
+    default-language: GHC2024
+    build-depends: base >= 4 && < 5, shared, aeson, scotty >= 0.20, lucid, text, stm, time, sqlite-simple, directory, filepath, bytestring, containers, websockets, warp, wai-websockets
+    other-modules: 
+        AppState
+        Database
+        Web.Views.Layout
+        Web.Views.Demandas
+        Web.Views.NovaDemanda
+    ghc-options: -Wall -threaded

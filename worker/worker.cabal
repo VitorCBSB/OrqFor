@@ -1,0 +1,12 @@
+cabal-version: 3.0
+name:          Worker
+version:       0.1.0.0
+author:        Vitor Coimbra
+build-type:    Simple
+
+executable worker
+    main-is: Main.hs
+    hs-source-dirs: app
+    default-language: GHC2024
+    build-depends: base >= 4 && < 5, aeson, shared, websockets, bytestring, text
+    ghc-options: -Wall
