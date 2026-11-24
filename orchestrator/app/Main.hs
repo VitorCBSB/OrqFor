@@ -96,42 +96,46 @@ main = do
 
   putStrLn "Orquestrador (HTTP + WS) escutando em 0.0.0.0:12000"
 
-  app <- scottyApp $ do
-    get "/" $ do
-      demandas <- liftIO $ listarDemandasDB (stDb state)
-      html $ renderText (paginaDemandas demandas)
-
-    get "/nova-demanda" $
-      html $ renderText paginaNovaDemanda
-
-    post "/submeter-demanda" $ do
-      nome      <- formParam "usuarioNome"
-      matricula <- formParam "usuarioMatricula"
-      email     <- formParam "usuarioEmail"
-      diretorio <- formParam "demandaDiretorio"
-      produto   <- formParam "nomeProdutoFinal"
-      perfil    <- formParam "perfilIPED"
-      usarPA    <- lerCheckbox "gerarRelatorioPA"
-      usarIPED  <- lerCheckbox "executarIndexacaoIPED"
-
-      let solicitante = Usuario
-            { usuarioNome      = T.strip nome
-            , usuarioMatricula = Matricula (T.strip matricula)
-            , usuarioEmail     = Email (T.strip email)
-            }
-          caminho = CaminhoCompartilhado (T.strip diretorio)
-          config  = ConfigProcessamento
-            { nomeProdutoFinal      = T.strip produto
-            , gerarRelatorioPA      = usarPA
-            , executarIndexacaoIPED = usarIPED
-            , perfilIPED            = perfil
-            , opcoesExtras          = []
-            }
-
-      agora <- liftIO getCurrentTime
-      _ <- liftIO $ inserirDemandaDB (stDb state) solicitante caminho config agora
-      redirect "/"
+  app <- scottyApp $ routes state
 
   -- Warp escuta em todas as interfaces (0.0.0.0) na porta 12000
   Warp.run 12000 $
     websocketsOr WS.defaultConnectionOptions (wsHandler state) app
+
+routes :: AppState -> ScottyM ()
+routes state = do
+  get "/" $ do
+    demandas <- liftIO $ listarDemandasDB (stDb state)
+    html $ renderText (paginaDemandas demandas)
+
+  get "/nova-demanda" $
+    html $ renderText paginaNovaDemanda
+
+  post "/submeter-demanda" $ do
+    nome      <- formParam "usuarioNome"
+    matricula <- formParam "usuarioMatricula"
+    email     <- formParam "usuarioEmail"
+    diretorio <- formParam "demandaDiretorio"
+    produto   <- formParam "nomeProdutoFinal"
+    perfil    <- formParam "perfilIPED"
+    urgente   <- lerCheckbox "urgente"
+    usarPA    <- lerCheckbox "gerarRelatorioPA"
+    usarIPED  <- lerCheckbox "executarIndexacaoIPED"
+
+    let solicitante = Usuario
+          { usuarioNome      = T.strip nome
+          , usuarioMatricula = Matricula (T.strip matricula)
+          , usuarioEmail     = Email (T.strip email)
+          }
+        caminho = CaminhoCompartilhado (T.strip diretorio)
+        config  = ConfigProcessamento
+          { nomeProdutoFinal      = T.strip produto
+          , gerarRelatorioPA      = usarPA
+          , executarIndexacaoIPED = usarIPED
+          , perfilIPED            = perfil
+          , opcoesExtras          = []
+          }
+
+    agora <- liftIO getCurrentTime
+    _ <- liftIO $ inserirDemandaDB (stDb state) solicitante caminho config urgente agora
+    redirect "/"

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS demandas (
     diretorio_entrada  TEXT NOT NULL,
     nome_produto_final TEXT NOT NULL,
     config_json        TEXT NOT NULL,
+    urgente            INTEGER NOT NULL DEFAULT 0,
     caminho_saida      TEXT,
     mensagem_erro      TEXT,
     submetida_em       TEXT NOT NULL,

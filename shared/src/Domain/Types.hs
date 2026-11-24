@@ -82,6 +82,7 @@ data Demanda = Demanda
   , demandaSolicitante :: Usuario
   , demandaDiretorio   :: CaminhoCompartilhado
   , demandaConfig      :: ConfigProcessamento
+  , demandaUrgente     :: Bool
   , demandaCriadaEm    :: UTCTime
   } deriving stock (Show, Eq, Generic)
 

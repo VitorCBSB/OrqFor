@@ -41,6 +41,11 @@ fragmentoListaDemandas demandas =
   where
     renderLinha :: DemandaResumo -> Html ()
     renderLinha d = tr_ $ do
+      td_ $ do
+        strong_ ("#" <> toHtml (show (drId d)))
+        if drUrgente d
+          then span_ [style_ "margin-left: 0.5rem; color: #c62828; font-weight: bold"] "[URGENTE]"
+          else pure ()
       td_ $ strong_ ("#" <> toHtml (show (drId d)))
       td_ $ toHtml (drUsuarioNome d <> " (" <> drMatricula d <> ")")
       td_ $ code_ (toHtml (drDiretorio d))

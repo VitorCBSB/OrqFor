@@ -9,6 +9,7 @@ module Database
   , listarDemandasDB
   , validarWorkerDB
   , atualizarHeartbeatWorkerDB
+  , buscarProximaDemandaFilaDB
   ) where
 
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
@@ -19,7 +20,6 @@ import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time (UTCTime)
 import Database.SQLite.Simple
@@ -38,6 +38,7 @@ data DemandaResumo = DemandaResumo
   , drDiretorio     :: Text
   , drProdutoFinal  :: Text
   , drConfig        :: ConfigProcessamento
+  , drUrgente       :: Bool
   , drEstadoCodigo  :: Text
   , drEstadoDesc    :: Text
   , drWorkerId      :: Maybe Text
@@ -53,6 +54,7 @@ instance FromRow DemandaResumo where
     drDiretorio    <- field
     drProdutoFinal <- field
     cfgTexto       <- field :: RowParser Text
+    drUrgente      <- field
     drEstadoCodigo <- field
     drEstadoDesc   <- field
     drWorkerId     <- field
@@ -97,9 +99,10 @@ inserirDemandaDB
   -> Usuario
   -> CaminhoCompartilhado
   -> ConfigProcessamento
+  -> Bool
   -> UTCTime
   -> IO Demanda
-inserirDemandaDB pool usr@Usuario{..} caminho cfg agora = withDB pool $ \conn ->
+inserirDemandaDB pool usr@Usuario{..} caminho cfg urgente agora = withDB pool $ \conn ->
   withTransaction conn $ do
     -- Upsert do usuário solicitante
     execute conn
@@ -115,12 +118,13 @@ inserirDemandaDB pool usr@Usuario{..} caminho cfg agora = withDB pool $ \conn ->
 
     execute conn
       "INSERT INTO demandas \
-      \  (usuario_email, estado_id, diretorio_entrada, nome_produto_final, config_json, submetida_em) \
-      \VALUES (?, 1, ?, ?, ?, ?);"
+      \  (usuario_email, estado_id, diretorio_entrada, nome_produto_final, config_json, urgente, submetida_em) \
+      \VALUES (?, 1, ?, ?, ?, ?, ?);"
       ( unEmail usuarioEmail
       , unCaminho caminho
       , nomeProdutoFinal cfg
       , configJsonTexto
+      , urgente
       , agora
       )
 
@@ -130,6 +134,7 @@ inserirDemandaDB pool usr@Usuario{..} caminho cfg agora = withDB pool $ \conn ->
       , demandaSolicitante = usr
       , demandaDiretorio   = caminho
       , demandaConfig      = cfg
+      , demandaUrgente     = urgente
       , demandaCriadaEm    = agora
       }
 
@@ -162,3 +167,27 @@ atualizarHeartbeatWorkerDB pool workerId agora = withDB pool $ \conn ->
   execute conn
     "UPDATE workers SET ultimo_heartbeat = ? WHERE id = ?;"
     (agora, workerId)
+
+-- | Priorize urgentes na fila (urgente = 1 primeiro, depois ordem de chegada por id)
+buscarProximaDemandaFilaDB :: DBPool -> IO (Maybe Demanda)
+buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
+  rows <- query_ conn
+    "SELECT d.id, u.nome, u.matricula, u.email, d.diretorio_entrada, d.config_json, d.urgente, d.submetida_em \
+    \FROM demandas d \
+    \JOIN usuarios u ON u.email = d.usuario_email \
+    \WHERE d.estado_id = 1 \
+    \ORDER BY d.urgente DESC, d.id ASC \
+    \LIMIT 1;"
+  case rows of
+    [(did, unome, umat, uemail, dir, cfgTxt, urg, subEm)] -> do
+      let cfgPadrao = ConfigProcessamento "Teste" False False "default" []
+          cfg = fromMaybe cfgPadrao (decodeStrict (encodeUtf8 cfgTxt))
+      pure $ Just Demanda
+        { demandaId          = DemandaId did
+        , demandaSolicitante = Usuario unome (Matricula umat) (Email uemail)
+        , demandaDiretorio   = CaminhoCompartilhado dir
+        , demandaConfig      = cfg
+        , demandaUrgente     = urg
+        , demandaCriadaEm    = subEm
+        }
+    _ -> pure Nothing

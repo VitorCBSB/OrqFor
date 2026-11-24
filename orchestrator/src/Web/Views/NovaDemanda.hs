@@ -51,6 +51,9 @@ formularioDemanda =
               option_ [value_ "default"] "Default"
               option_ [value_ "fastmode"] "Fastmode"
               option_ [value_ "forensic"] "Forensic"
+          label_ $ do
+            input_ [type_ "checkbox", name_ "urgente", value_ "true"]
+            " Demanda Urgente (priorizar na fila de processamento)"
 
         campoCheckbox "Executar geração de relatório no PA" "gerarRelatorioPA" True
         campoCheckbox "Executar indexação no IPED" "executarIndexacaoIPED" True
