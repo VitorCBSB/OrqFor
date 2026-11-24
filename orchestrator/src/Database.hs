@@ -144,7 +144,7 @@ listarDemandasDB pool = withDB pool $ \conn ->
   query_ conn
     "SELECT \
     \  d.id, u.nome, u.matricula, d.diretorio_entrada, d.nome_produto_final, \
-    \  d.config_json, e.codigo, e.descricao, d.worker_id, d.mensagem_erro, d.submetida_em \
+    \  d.config_json, d.urgente, e.codigo, e.descricao, d.worker_id, d.mensagem_erro, d.submetida_em \
     \FROM demandas d \
     \JOIN usuarios u ON u.email = d.usuario_email \
     \JOIN estados_processamento e ON e.id = d.estado_id \
