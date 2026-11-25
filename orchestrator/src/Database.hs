@@ -10,6 +10,9 @@ module Database
   , validarWorkerDB
   , atualizarHeartbeatWorkerDB
   , buscarProximaDemandaFilaDB
+  , atribuirDemandaWorkerDB
+  , atualizarEtapaDemandaDB
+  , finalizarDemandaDB
   ) where
 
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
@@ -191,3 +194,39 @@ buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
         , demandaCriadaEm    = subEm
         }
     _ -> pure Nothing
+
+-- | Marca a demanda como alocada (estado 2 = INICIALIZANDO) e registra o worker
+atribuirDemandaWorkerDB :: DBPool -> Int64 -> Text -> UTCTime -> IO ()
+atribuirDemandaWorkerDB pool did wid agora = withDB pool $ \conn ->
+  execute conn
+    "UPDATE demandas SET worker_id = ?, estado_id = 2, iniciada_em = ? WHERE id = ?;"
+    (wid, agora, did)
+
+-- | Atualiza apenas a etapa atual da demanda no banco
+atualizarEtapaDemandaDB :: DBPool -> Int64 -> EtapaProcessamento -> IO ()
+atualizarEtapaDemandaDB pool did etapa = withDB pool $ \conn ->
+  execute conn
+    "UPDATE demandas SET estado_id = ? WHERE id = ?;"
+    (etapaParaId etapa, did)
+
+-- | Atualiza o estado final (5 = FINALIZADO, 6 = ERRO)
+finalizarDemandaDB 
+  :: DBPool 
+  -> Int64 
+  -> EtapaProcessamento
+  -> Maybe Text 
+  -> Maybe Text 
+  -> UTCTime 
+  -> IO ()
+finalizarDemandaDB pool did etapaFinal saida erro agora = withDB pool $ \conn ->
+  execute conn
+    "UPDATE demandas SET estado_id = ?, caminho_saida = ?, mensagem_erro = ?, concluida_em = ? WHERE id = ?;"
+    (etapaParaId etapaFinal, saida, erro, agora, did)
+
+etapaParaId :: EtapaProcessamento -> Int
+etapaParaId NaFila = 1
+etapaParaId Inicializando = 2
+etapaParaId ExecutandoPA = 3
+etapaParaId ExecutandoIPED = 4
+etapaParaId Finalizado = 5
+etapaParaId (Erro _) = 6

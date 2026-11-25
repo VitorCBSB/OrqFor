@@ -57,7 +57,8 @@ instance FromJSON ConfigProcessamento
 
 -- | Etapas reportadas em tempo real pelo Worker Windows
 data EtapaProcessamento
-  = Inicializando
+  = NaFila
+  | Inicializando
   | ExecutandoPA
   | ExecutandoIPED
   | Finalizado
@@ -70,7 +71,7 @@ instance FromJSON EtapaProcessamento
 -- | Estado operacional da máquina Windows
 data EstadoWorker
   = Livre
-  | Ocupada DemandaId EtapaProcessamento
+  | Ocupada DemandaId
   deriving stock (Show, Eq, Generic)
 
 instance ToJSON EstadoWorker

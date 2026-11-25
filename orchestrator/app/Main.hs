@@ -2,12 +2,14 @@
 
 module Main where
 
+import Control.Concurrent (threadDelay, forkIO)
 import Control.Concurrent.STM
 import qualified Control.Exception as EX
 import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Map as Map
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -73,16 +75,54 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn =
         atualizarHeartbeatWorkerDB (stDb state) widTexto agora
         atomically $ atualizarEstadoWorkerSTM state wid estadoAtual
 
-      Just (AtualizacaoEtapa did etapa) ->
+      Just (AtualizacaoEtapa (DemandaId did) etapa) -> do
+        atualizarEtapaDemandaDB (stDb state) did etapa
         TIO.putStrLn $ "[WS] " <> widTexto <> " atualizou demanda " <> T.pack (show did) <> " -> " <> T.pack (show etapa)
 
-      Just (DemandaConcluida did saida) ->
-        TIO.putStrLn $ "[WS] " <> widTexto <> " atualizou demanda " <> T.pack (show did) <> " em " <> T.pack (show saida)
+      Just (DemandaConcluida (DemandaId did) (CaminhoCompartilhado saida)) -> do
+        agora <- getCurrentTime
+        finalizarDemandaDB (stDb state) did Finalizado (Just saida) Nothing agora
+        atomically $ atualizarEstadoWorkerSTM state wid Livre
+        TIO.putStrLn $ "[WS] " <> widTexto <> " concluiu demanda " <> T.pack (show did) <> " em " <> T.pack (show saida)
 
-      Just (DemandaFalhou did etapaErro) ->
+      Just (DemandaFalhou (DemandaId did) etapaErro) -> do
+        agora <- getCurrentTime
+        let msgErro = case etapaErro of
+              Erro txt -> txt
+              outra -> T.pack (show outra)
+        finalizarDemandaDB (stDb state) did etapaErro Nothing (Just msgErro) agora
+        atomically $ atualizarEstadoWorkerSTM state wid Livre
         TIO.putStrLn $ "[WS] " <> widTexto <> " falhou na demanda " <> T.pack (show did) <> ": " <> T.pack (show etapaErro)
       _ -> pure ()
   ) `EX.catch` (\(_ :: EX.SomeException) -> pure ())
+
+-- | Procura demandas NA_FILA e envia para o primeiro worker Livre conectado
+loopDespachante :: AppState -> IO ()
+loopDespachante state = forever $ do
+  threadDelay 3000000 -- 3 segundos
+  mDemanda <- buscarProximaDemandaFilaDB (stDb state)
+  case mDemanda of
+    Nothing -> pure ()
+    Just demanda -> do
+      -- Procura um worker Livre no STM e já o marca como ocupado localmente
+      mWorkerLivre <- atomically $ do
+        mapa <- readTVar (stWorkersAtivos state)
+        case filter (\(_, cw) -> cwEstado cw == Livre) (Map.toList mapa) of
+          [] -> pure Nothing
+          ((wid, cw) : _) -> do
+            -- Atualiza estado no STM imediatamente para evitar envio duplo
+            writeTVar (stWorkersAtivos state)
+              (Map.insert wid (cw { cwEstado = Ocupada (demandaId demanda) }) mapa)
+            pure (Just (wid, cwConn cw))
+
+      case mWorkerLivre of
+        Nothing -> pure () -- Nenhum worker livre no momento
+        Just (wid@(WorkerId widTexto), conn) -> do
+          agora <- getCurrentTime
+          let DemandaId did = demandaId demanda
+          atribuirDemandaWorkerDB (stDb state) did widTexto agora
+          TIO.putStrLn $ "[Despachante] Enviando demanda #" <> T.pack (show did) <> " para " <> widTexto
+          WS.sendTextData conn (Aeson.encode (IniciarDemanda demanda))
 
 main :: IO ()
 main = do
@@ -97,6 +137,9 @@ main = do
   putStrLn "Orquestrador (HTTP + WS) escutando em 0.0.0.0:12000"
 
   app <- scottyApp $ routes state
+
+  -- Loop que verifica demandas e aloca para máquinas livres
+  void $ forkIO (loopDespachante state)
 
   -- Warp escuta em todas as interfaces (0.0.0.0) na porta 12000
   Warp.run 12000 $

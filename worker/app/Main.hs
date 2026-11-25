@@ -3,6 +3,7 @@
 module Main where
 
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVarIO, writeTVar)
 import Control.Monad (forever, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BL
@@ -12,8 +13,38 @@ import Domain.Protocol
 import Domain.Types
 import qualified Network.WebSockets as WS
 import System.Environment (getArgs)
-import System.Exit (exitFailure)
+import System.Exit (ExitCode (..), exitFailure)
 import System.IO (hSetEncoding, stderr, stdout, utf8)
+import System.Process (proc, readCreateProcessWithExitCode)
+
+-- | Executa o script AutoHotkey de teste e reporta o resultado ao Orquestrador
+executarScriptTeste :: WS.Connection -> TVar EstadoWorker -> Demanda -> IO ()
+executarScriptTeste conn varEstado demanda = do
+  let did = demandaId demanda
+      caminhoAHK = "C:\\Users\\PA\\Desktop\\PA_Auto\\test.ahk"
+      -- Se o AutoHotkey.exe não estiver no PATH do Windows, use o caminho completo:
+      -- ex: "C:\\Program Files\\AutoHotkey\\v2\\AutoHotkey64.exe"
+      executavelAHK = "C:\\Users\\PA\\Desktop\\PA_Auto\\deps\\AutoHotKey\\AutoHotkey64.exe"
+
+  atomically $ writeTVar varEstado (Ocupada did)
+  TIO.putStrLn $ "[Execução] Disparando AutoHotkey: " <> T.pack caminhoAHK
+
+  -- Executa de forma síncrona (aguarda o script terminar)
+  (exitCode, _stdout, stderrStr) <-
+    readCreateProcessWithExitCode (proc executavelAHK [caminhoAHK]) ""
+
+  case exitCode of
+    ExitSuccess -> do
+      TIO.putStrLn "[Execução] Script AutoHotkey finalizado com sucesso."
+      let saidaTeste = CaminhoCompartilhado "C:\\Users\\PA\\Desktop\\PA_Auto\\saida_teste"
+      WS.sendTextData conn (Aeson.encode (DemandaConcluida did saidaTeste))
+
+    ExitFailure codigo -> do
+      let motivo = "AutoHotkey retornou erro (código " <> T.pack (show codigo) <> "): " <> T.pack stderrStr
+      TIO.putStrLn $ "[Execução] " <> motivo
+      WS.sendTextData conn (Aeson.encode (DemandaFalhou did (Erro motivo)))
+
+  atomically $ writeTVar varEstado Livre
 
 main :: IO ()
 main = do
@@ -28,38 +59,43 @@ main = do
       exitFailure
 
   let wid = WorkerId widTexto
-      -- Ajuste o construtor abaixo conforme o nome exato em Domain.Types (ex: Ocioso ou Livre)
-      estadoInicial = Livre
+  varEstado <- newTVarIO Livre
 
   TIO.putStrLn $ "Conectando ao orquestrador em " <> T.pack host <> ":12000 como " <> widTexto <> "..."
 
   WS.runClient host 12000 "/ws" $ \conn -> do
-    -- 1. Envia o HandshakeWorker definido no Protocol.hs
-    WS.sendTextData conn (Aeson.encode (HandshakeWorker wid estadoInicial))
+    estadoAtual <- readTVarIO varEstado
+    WS.sendTextData conn (Aeson.encode (HandshakeWorker wid estadoAtual))
 
-    -- 2. Aguarda resposta do orquestrador
     respostaRaw <- WS.receiveData conn :: IO BL.ByteString
     case Aeson.decode respostaRaw of
       Just HandshakeAceito -> do
         TIO.putStrLn "[OK] Handshake aceito pelo orquestrador."
 
-        -- Thread em background enviando heartbeat a cada 15s
+        -- Heartbeat em background reportando o estado real do TVar
         void $ forkIO $ forever $ do
           threadDelay 15000000
-          WS.sendTextData conn (Aeson.encode (HeartbeatWorker estadoInicial))
+          est <- readTVarIO varEstado
+          WS.sendTextData conn (Aeson.encode (HeartbeatWorker est))
 
-        -- Loop principal aguardando comandos do orquestrador (MsgParaWorker)
+        -- Loop de comandos vindos do orquestrador
         forever $ do
           cmdRaw <- WS.receiveData conn :: IO BL.ByteString
           case Aeson.decode cmdRaw of
-            Just (IniciarDemanda demanda) ->
-              TIO.putStrLn $ "[CMD] Recebida ordem para iniciar demanda: " <> T.pack (show (demandaId demanda))
+            Just (IniciarDemanda demanda) -> do
+              TIO.putStrLn $ "[CMD] Recebida demanda: " <> T.pack (show (demandaId demanda))
+              -- Roda em thread separada para não bloquear o recebimento de outras mensagens WS
+              void $ forkIO $ executarScriptTeste conn varEstado demanda
+
             Just (CancelarDemanda did) ->
-              TIO.putStrLn $ "[CMD] Recebida ordem para cancelar demanda: " <> T.pack (show did)
-            Just SolicitarEstado ->
-              WS.sendTextData conn (Aeson.encode (HeartbeatWorker estadoInicial))
+              TIO.putStrLn $ "[CMD] Cancelamento solicitado para: " <> T.pack (show did)
+
+            Just SolicitarEstado -> do
+              est <- readTVarIO varEstado
+              WS.sendTextData conn (Aeson.encode (HeartbeatWorker est))
+
             _ ->
-              TIO.putStrLn "[Aviso] Mensagem inesperada recebida do servidor."
+              TIO.putStrLn $ "[Aviso] Mensagem inesperada recebida do servidor: " <> (T.pack $ show cmdRaw)
 
       Just (HandshakeRecusado motivo) -> do
         TIO.putStrLn $ "[ERRO] Conexão recusada: " <> motivo
