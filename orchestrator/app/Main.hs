@@ -19,7 +19,7 @@ import qualified Network.Wai.Handler.Warp as Warp
 import Network.Wai.Handler.WebSockets
 import qualified Network.WebSockets as WS
 import System.FilePath
-import System.IO (hSetEncoding, stderr, stdout, utf8)
+import System.IO (BufferMode (LineBuffering), hSetBuffering, hSetEncoding, stderr, stdout, utf8)
 import Web.Scotty
 import Web.Views.Demandas
 import Web.Views.NovaDemanda (paginaNovaDemanda)
@@ -167,6 +167,8 @@ main :: IO ()
 main = do
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
+  -- Logs imediatos mesmo quando a saída é redirecionada (arquivo, pipe, journald)
+  hSetBuffering stdout LineBuffering
 
   pool  <- inicializarBanco
              ("dados" </> "orquestrador.db")
