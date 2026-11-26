@@ -13,6 +13,7 @@ import Data.Maybe (isJust)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Data.Time (getCurrentTime)
+import Data.Unique (newUnique)
 import Lucid (renderText)
 import qualified Network.Wai.Handler.Warp as Warp
 import Network.Wai.Handler.WebSockets
@@ -49,14 +50,20 @@ wsHandler state pending = do
           else do
             agora <- getCurrentTime
             atualizarHeartbeatWorkerDB (stDb state) widTexto agora
-            atomically $ registrarWorkerSTM state wid conn estadoInicial
+            token <- newUnique
+            anterior <- atomically $ registrarWorkerSTM state wid conn estadoInicial token
+            -- Reconexão do mesmo worker: encerra a conexão antiga para que o handler
+            -- dela não continue alterando o estado do registro novo.
+            forM_ anterior $ \antiga -> do
+              TIO.putStrLn $ "[WS] Worker " <> widTexto <> " reconectou; encerrando conexão anterior."
+              void $ tentar (WS.sendClose antiga ("Substituida por nova conexao" :: T.Text))
             TIO.putStrLn $ "[WS] Worker conectado e autenticado: " <> widTexto <> " | Estado: " <> T.pack (show estadoInicial)
             WS.sendTextData conn (Aeson.encode HandshakeAceito)
 
             -- Mantém a escuta de heartbeats e garante remoção do STM ao desconectar
             loopMensagensWorker state wid conn
               `EX.finally` do
-                atomically $ removerWorkerSTM state wid
+                atomically $ removerWorkerSTM state wid token
                 TIO.putStrLn $ "[WS] Worker desconectado: " <> widTexto
 
       _ -> do
