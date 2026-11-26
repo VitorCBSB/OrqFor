@@ -23,14 +23,7 @@ import System.FilePath (takeDirectory, (</>))
 import System.IO (BufferMode (LineBuffering), hSetBuffering, hSetEncoding, stderr, stdout, utf8)
 import System.Process (proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
-
--- | Executa uma ação capturando exceções síncronas. Exceções assíncronas são propagadas.
-tentar :: IO a -> IO (Either EX.SomeException a)
-tentar acao = do
-  r <- EX.try acao
-  case r of
-    Left e | Just (ae :: EX.SomeAsyncException) <- EX.fromException e -> EX.throwIO ae
-    _ -> pure r
+import Util (tentar)
 
 -- | Envia uma mensagem pela conexão atual, se houver. Como a conexão pode ser
 -- trocada por uma reconexão durante a execução de uma demanda, quem executa

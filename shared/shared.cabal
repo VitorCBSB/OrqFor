@@ -9,6 +9,7 @@ library
         Domain.Types
         Domain.Protocol
         Configuracao
+        Util
     hs-source-dirs: src
     default-language: GHC2024
     build-depends: base >= 4 && < 5, aeson, text, time

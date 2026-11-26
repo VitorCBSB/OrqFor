@@ -12,6 +12,10 @@ executable orchestrator
     other-modules: 
         AppState
         Database
+        Despachante
+        Reconciliacao
+        Ws
+        Web.Rotas
         Web.Views.Layout
         Web.Views.Demandas
         Web.Views.NovaDemanda
