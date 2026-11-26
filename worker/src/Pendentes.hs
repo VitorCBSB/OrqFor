@@ -18,12 +18,12 @@ import qualified Data.ByteString.Lazy as BL
 import Data.List (isSuffixOf)
 import Data.Maybe (catMaybes)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import System.Directory (listDirectory, removeFile, renameFile)
 import System.FilePath ((</>))
 
 import Domain.Protocol
 import Domain.Types
+import Log (exibirDemanda, registrar)
 import Util (tentar)
 
 arquivoPendente :: FilePath -> DemandaId -> FilePath
@@ -45,8 +45,8 @@ gravarPendente dir did msg = do
     BL.writeFile temporario (Aeson.encode msg)
     renameFile temporario destino
   case gravado of
-    Left e -> TIO.putStrLn $ "[Pendentes] Falha ao gravar resultado da demanda "
-                <> T.pack (show (unDemandaId did)) <> " em disco (sem reenvio garantido): " <> T.pack (show e)
+    Left e -> registrar "Pendentes" $ "Falha ao gravar resultado da demanda "
+                <> exibirDemanda did <> " em disco (sem reenvio garantido): " <> T.pack (show e)
     Right () -> pure ()
 
 -- | Lê os resultados ainda não confirmados. Arquivos ilegíveis são registrados e ignorados.
@@ -62,12 +62,12 @@ listarPendentes dir = do
               Left e -> show e
               Right (Left erro) -> erro
               Right (Right _) -> "não é um resultado de demanda"
-        TIO.putStrLn $ "[Pendentes] Ignorando " <> T.pack nome <> ": " <> T.pack motivo
+        registrar "Pendentes" $ "Ignorando " <> T.pack nome <> ": " <> T.pack motivo
         pure Nothing
 
 removerPendente :: FilePath -> DemandaId -> IO ()
 removerPendente dir did = do
   r <- tentar (removeFile (arquivoPendente dir did))
   case r of
-    Left e -> TIO.putStrLn $ "[Pendentes] Falha ao remover resultado confirmado: " <> T.pack (show e)
-    Right () -> TIO.putStrLn $ "[Pendentes] Resultado da demanda " <> T.pack (show (unDemandaId did)) <> " confirmado pelo orquestrador."
+    Left e -> registrar "Pendentes" $ "Falha ao remover resultado confirmado: " <> T.pack (show e)
+    Right () -> registrar "Pendentes" $ "Resultado da demanda " <> exibirDemanda did <> " confirmado pelo orquestrador."

@@ -1,7 +1,10 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Main where
 
 import Control.Concurrent (forkIO)
 import Control.Monad (void)
+import qualified Data.Text as T
 import qualified Network.Wai.Handler.Warp as Warp
 import Network.Wai.Handler.WebSockets (websocketsOr)
 import qualified Network.WebSockets as WS
@@ -13,6 +16,7 @@ import AppState (novoAppState)
 import Configuracao (portaOrquestrador)
 import Database (inicializarBanco)
 import Despachante (loopDespachante)
+import Log (registrar)
 import Reconciliacao (loopVarreduraOrfas)
 import Web.Rotas (routes)
 import Ws (limiteSilencioSegundos, wsHandler)
@@ -29,7 +33,7 @@ main = do
              ("orchestrator" </> "sql" </> "schema.sql")
   state <- novoAppState pool
 
-  putStrLn $ "Orquestrador (HTTP + WS) escutando em 0.0.0.0:" <> show portaOrquestrador
+  registrar "Orquestrador" $ "Escutando HTTP e WebSocket em 0.0.0.0:" <> T.pack (show portaOrquestrador)
 
   app <- scottyApp $ routes state
 

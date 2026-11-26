@@ -8,13 +8,13 @@ module Execucao
 import Control.Concurrent.STM (atomically, writeTVar)
 import qualified Control.Exception as EX
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import System.Exit (ExitCode (..))
 import System.Process (proc, readCreateProcessWithExitCode)
 
 import Ambiente
 import Domain.Protocol
 import Domain.Types
+import Log (registrar)
 import Pendentes (gravarPendente)
 import Util (tentar)
 
@@ -35,7 +35,7 @@ executarScriptTeste amb demanda = do
   -- O 'finally' garante a volta a Livre em qualquer saída, inclusive exceções
   -- assíncronas (ex.: killThread), para o worker nunca ficar preso em Ocupada.
   (`EX.finally` atomically (writeTVar (ambEstado amb) Livre)) $ do
-    TIO.putStrLn $ "[Execução] Disparando AutoHotkey: " <> T.pack caminhoAHK
+    registrar "Execução" $ "Disparando AutoHotkey: " <> T.pack caminhoAHK
 
     -- Executa de forma síncrona (aguarda o script terminar). Exceções ao lançar
     -- o processo (ex.: executável inexistente) são capturadas e viram falha.
@@ -45,15 +45,15 @@ executarScriptTeste amb demanda = do
     case resultado of
       Left e -> do
         let motivo = "Falha ao executar o AutoHotkey: " <> T.pack (show e)
-        TIO.putStrLn $ "[Execução] " <> motivo
+        registrar "Execução" motivo
         reportar (DemandaFalhou did motivo)
 
       Right (ExitSuccess, _stdout, _stderr) -> do
-        TIO.putStrLn "[Execução] Script AutoHotkey finalizado com sucesso."
+        registrar "Execução" "Script AutoHotkey finalizado com sucesso."
         let saidaTeste = CaminhoCompartilhado "C:\\Users\\PA\\Desktop\\PA_Auto\\saida_teste"
         reportar (DemandaConcluida did saidaTeste)
 
       Right (ExitFailure codigo, _stdout, stderrStr) -> do
         let motivo = "AutoHotkey retornou erro (código " <> T.pack (show codigo) <> "): " <> T.pack stderrStr
-        TIO.putStrLn $ "[Execução] " <> motivo
+        registrar "Execução" motivo
         reportar (DemandaFalhou did motivo)

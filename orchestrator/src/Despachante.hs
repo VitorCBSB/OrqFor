@@ -12,7 +12,6 @@ import Control.Monad (forever)
 import qualified Data.Aeson as Aeson
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import Data.Time (getCurrentTime)
 import qualified Network.WebSockets as WS
 
@@ -20,6 +19,7 @@ import AppState
 import Database (atribuirDemandaWorkerDB, buscarProximaDemandaFilaDB, devolverDemandaParaFilaDB)
 import Domain.Protocol (MsgParaWorker (IniciarDemanda))
 import Domain.Types
+import Log (exibirDemanda, registrar)
 import Util (tentar)
 
 -- | Procura demandas NA_FILA e envia para o primeiro worker Livre conectado.
@@ -29,7 +29,7 @@ loopDespachante state = forever $ do
   threadDelay 3000000 -- 3 segundos
   resultado <- tentar (despacharProxima state)
   case resultado of
-    Left e -> TIO.putStrLn $ "[Despachante] Erro na iteração (laço continua): " <> T.pack (show e)
+    Left e -> registrar "Despachante" $ "Erro na iteração (laço continua): " <> T.pack (show e)
     Right () -> pure ()
 
 -- | Uma iteração do despachante: reserva um worker, atribui a demanda no banco
@@ -62,14 +62,14 @@ despacharProxima state = do
               atomically $ atualizarEstadoWorkerSTM state wid Livre
               EX.throwIO e
             Right () -> pure ()
-          TIO.putStrLn $ "[Despachante] Enviando demanda #" <> T.pack (show did) <> " para " <> widTexto
+          registrar "Despachante" $ "Enviando demanda " <> exibirDemanda (demandaId demanda) <> " para " <> widTexto
           -- Passo 2: envio. Se falhar, a conexão provavelmente caiu; devolve a
           -- demanda para a fila. O worker permanece reservado até o handler da
           -- conexão removê-lo do mapa (ou até o próximo heartbeat dele).
           enviado <- tentar (WS.sendTextData conn (Aeson.encode (IniciarDemanda demanda)))
           case enviado of
             Left e -> do
-              TIO.putStrLn $ "[Despachante] Falha ao enviar demanda #" <> T.pack (show did)
+              registrar "Despachante" $ "Falha ao enviar demanda " <> exibirDemanda (demandaId demanda)
                 <> " para " <> widTexto <> "; devolvendo à fila: " <> T.pack (show e)
               devolverDemandaParaFilaDB (stDb state) did
             Right () -> pure ()

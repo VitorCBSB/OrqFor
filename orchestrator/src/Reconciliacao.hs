@@ -11,12 +11,12 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)
 import Control.Monad (forM_, forever)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 
 import AppState
 import Database (listarDemandasEmAndamentoDB, marcarDemandaOrfaDB)
 import Domain.Types
+import Log (exibirDemanda, registrar)
 import Util (tentar)
 
 -- | Prazo sem heartbeat após o qual as demandas em andamento de um worker
@@ -41,7 +41,7 @@ reconciliarNoHandshake state widTexto estadoInformado pendentes = do
   forM_ orfas $ \did -> do
     let motivo = "O worker " <> widTexto <> " reconectou sem esta demanda em execução; o resultado foi perdido."
     marcarDemandaOrfaDB (stDb state) did motivo agora
-    TIO.putStrLn $ "[Reconciliação] Demanda #" <> T.pack (show did) <> " marcada como erro: " <> motivo
+    registrar "Reconciliação" $ "Demanda " <> exibirDemanda (DemandaId did) <> " marcada como erro: " <> motivo
 
 -- | Periodicamente marca como ERRO as demandas em andamento cujo worker não está
 -- conectado e não envia heartbeat há mais de 'prazoDemandaOrfa'.
@@ -60,7 +60,7 @@ loopVarreduraOrfas state = forever $ do
       let motivo = "O worker " <> w <> " ficou sem contato por mais de "
                    <> T.pack (show (round (prazoDemandaOrfa / 60) :: Int)) <> " min durante o processamento."
       marcarDemandaOrfaDB (stDb state) did motivo agora
-      TIO.putStrLn $ "[Varredura] Demanda #" <> T.pack (show did) <> " marcada como erro: " <> motivo
+      registrar "Varredura" $ "Demanda " <> exibirDemanda (DemandaId did) <> " marcada como erro: " <> motivo
   case resultado of
-    Left e -> TIO.putStrLn $ "[Varredura] Erro na iteração (laço continua): " <> T.pack (show e)
+    Left e -> registrar "Varredura" $ "Erro na iteração (laço continua): " <> T.pack (show e)
     Right () -> pure ()

@@ -10,11 +10,11 @@ module Ambiente
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO)
 import qualified Data.Aeson as Aeson
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import qualified Network.WebSockets as WS
 
 import Domain.Protocol (MsgDoWorker)
 import Domain.Types (EstadoWorker (..), WorkerId)
+import Log (registrar)
 import Util (tentar)
 
 data Ambiente = Ambiente
@@ -38,9 +38,9 @@ enviarSePossivel :: Ambiente -> MsgDoWorker -> IO ()
 enviarSePossivel amb msg = do
   mConn <- readTVarIO (ambConexao amb)
   case mConn of
-    Nothing -> TIO.putStrLn "[Aviso] Sem conexão com o orquestrador; mensagem não enviada."
+    Nothing -> registrar "Conexão" "Sem conexão com o orquestrador; mensagem não enviada."
     Just conn -> do
       r <- tentar (WS.sendTextData conn (Aeson.encode msg))
       case r of
-        Left e -> TIO.putStrLn $ "[Aviso] Falha ao enviar mensagem: " <> T.pack (show e)
+        Left e -> registrar "Conexão" $ "Falha ao enviar mensagem: " <> T.pack (show e)
         Right () -> pure ()

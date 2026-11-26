@@ -16,7 +16,6 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
-import qualified Data.Text.IO as TIO
 import Data.Time (getCurrentTime)
 import Data.Unique (newUnique)
 import qualified Network.WebSockets as WS
@@ -32,6 +31,7 @@ import Database
   )
 import Domain.Protocol
 import Domain.Types
+import Log (exibirDemanda, exibirEstado, registrar)
 import Reconciliacao (reconciliarNoHandshake)
 import Util (tentar)
 
@@ -44,7 +44,7 @@ limiteSilencioSegundos = 3 * intervaloHeartbeatSegundos
 wsHandler :: AppState -> WS.ServerApp
 wsHandler state pending
   | caminho /= BS8.pack caminhoWebSocket = do
-      TIO.putStrLn $ "[WS] Conexão WebSocket recusada: caminho " <> TE.decodeUtf8With TEE.lenientDecode caminho
+      registrar "WS" $ "Conexão WebSocket recusada: caminho " <> TE.decodeUtf8With TEE.lenientDecode caminho
         <> " (esperado " <> T.pack caminhoWebSocket <> ")."
       WS.rejectRequest pending "Caminho WebSocket inválido."
   | otherwise = aceitarWorker state pending
@@ -62,7 +62,7 @@ aceitarWorker state pending = do
         conhecido <- validarWorkerDB (stDb state) widTexto
         if not conhecido
           then do
-            TIO.putStrLn $ "[WS] Conexão recusada para worker desconhecido/inativo: " <> widTexto
+            registrar "WS" $ "Conexão recusada para worker desconhecido/inativo: " <> widTexto
             WS.sendTextData conn (Aeson.encode (HandshakeRecusado "Worker não cadastrado ou inativo no orquestrador."))
             WS.sendClose conn ("Recusado" :: T.Text)
           else do
@@ -77,22 +77,22 @@ aceitarWorker state pending = do
             -- Reconexão do mesmo worker: encerra a conexão antiga para que o handler
             -- dela não continue alterando o estado do registro novo.
             forM_ anterior $ \antiga -> do
-              TIO.putStrLn $ "[WS] Worker " <> widTexto <> " reconectou; encerrando conexão anterior."
+              registrar "WS" $ "Worker " <> widTexto <> " reconectou; encerrando conexão anterior."
               void $ tentar (WS.sendClose antiga ("Substituida por nova conexao" :: T.Text))
-            TIO.putStrLn $ "[WS] Worker conectado e autenticado: " <> widTexto <> " | Estado: " <> T.pack (show estadoInicial)
+            registrar "WS" $ "Worker conectado e autenticado: " <> widTexto <> " | Estado: " <> exibirEstado estadoInicial
             WS.sendTextData conn (Aeson.encode HandshakeAceito)
 
             -- Mantém a escuta de heartbeats e garante remoção do STM ao desconectar
             loopMensagensWorker state wid conn
               `EX.finally` do
                 atomically $ removerWorkerSTM state wid token
-                TIO.putStrLn $ "[WS] Worker desconectado: " <> widTexto
+                registrar "WS" $ "Worker desconectado: " <> widTexto
 
       outra -> do
         let detalhe = case outra of
               Left erro -> "não decodificou (" <> T.pack erro <> ")"
               Right _ -> "a primeira mensagem não é um handshake"
-        TIO.putStrLn $ "[WS] Handshake inválido: " <> detalhe <> ". Início da mensagem: " <> trechoMensagem rawMsg
+        registrar "WS" $ "Handshake inválido: " <> detalhe <> ". Início da mensagem: " <> trechoMensagem rawMsg
         WS.sendTextData conn (Aeson.encode (HandshakeRecusado "Handshake inválido."))
         WS.sendClose conn ("Protocolo inválido" :: T.Text)
 
@@ -104,21 +104,21 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
   -- registradas. Exceções assíncronas (ex.: ThreadKilled) são repropagadas.
   resultado <- tentar laco
   case resultado of
-    Left e -> TIO.putStrLn $ "[WS] Conexão com " <> widTexto <> " encerrada: " <> T.pack (show e)
+    Left e -> registrar "WS" $ "Conexão com " <> widTexto <> " encerrada: " <> T.pack (show e)
     Right () -> pure ()
   where
     laco = do
       mRaw <- timeout (limiteSilencioSegundos * 1000000) (WS.receiveData conn :: IO BL.ByteString)
       case mRaw of
         Nothing ->
-          TIO.putStrLn $ "[WS] " <> widTexto <> " sem mensagens há "
+          registrar "WS" $ widTexto <> " sem mensagens há "
             <> T.pack (show limiteSilencioSegundos) <> " s; encerrando a conexão."
         Just rawData -> do
           -- Uma falha ao processar uma mensagem (ex.: erro no banco) é registrada
           -- sem derrubar a conexão.
           r <- tentar (processar rawData)
           case r of
-            Left e -> TIO.putStrLn $ "[WS] Erro ao processar mensagem de " <> widTexto
+            Left e -> registrar "WS" $ "Erro ao processar mensagem de " <> widTexto
                         <> " (conexão mantida): " <> T.pack (show e)
             Right () -> pure ()
           laco
@@ -126,11 +126,11 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
     processar rawData =
       case Aeson.eitherDecode rawData of
         Left erro ->
-          TIO.putStrLn $ "[WS] Mensagem não reconhecida de " <> widTexto <> " (" <> T.pack erro
+          registrar "WS" $ "Mensagem não reconhecida de " <> widTexto <> " (" <> T.pack erro
             <> "). Worker e orquestrador estão na mesma versão do protocolo? Início da mensagem: "
             <> trechoMensagem rawData
         Right HandshakeWorker{} ->
-          TIO.putStrLn $ "[WS] " <> widTexto <> " enviou um handshake repetido; ignorado."
+          registrar "WS" $ widTexto <> " enviou um handshake repetido; ignorado."
         Right (HeartbeatWorker estadoAtual) -> do
           agora <- getCurrentTime
           atualizarHeartbeatWorkerDB (stDb state) widTexto agora
@@ -140,20 +140,20 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
           atomically $ confirmarDemandaSTM state wid did
         Right (AtualizacaoEtapa (DemandaId did) etapa) -> do
           atualizarEtapaDemandaDB (stDb state) did etapa
-          TIO.putStrLn $ "[WS] " <> widTexto <> " atualizou demanda " <> T.pack (show did) <> " -> " <> T.pack (show etapa)
+          registrar "WS" $ widTexto <> " atualizou demanda " <> exibirDemanda (DemandaId did) <> " -> " <> T.pack (show etapa)
 
         Right (DemandaConcluida (DemandaId did) (CaminhoCompartilhado saida)) -> do
           agora <- getCurrentTime
           finalizarDemandaDB (stDb state) did Finalizado (Just saida) Nothing agora
           atomically $ liberarWorkerSTM state wid (DemandaId did)
-          TIO.putStrLn $ "[WS] " <> widTexto <> " concluiu demanda " <> T.pack (show did) <> " em " <> T.pack (show saida)
+          registrar "WS" $ widTexto <> " concluiu demanda " <> exibirDemanda (DemandaId did) <> " em " <> T.pack (show saida)
           confirmarResultado (DemandaId did)
 
         Right (DemandaFalhou (DemandaId did) motivo) -> do
           agora <- getCurrentTime
           finalizarDemandaDB (stDb state) did (Erro motivo) Nothing (Just motivo) agora
           atomically $ liberarWorkerSTM state wid (DemandaId did)
-          TIO.putStrLn $ "[WS] " <> widTexto <> " falhou na demanda " <> T.pack (show did) <> ": " <> motivo
+          registrar "WS" $ widTexto <> " falhou na demanda " <> exibirDemanda (DemandaId did) <> ": " <> motivo
           confirmarResultado (DemandaId did)
 
     -- Avisa o worker que o resultado foi gravado, para ele descartar a cópia
@@ -163,7 +163,7 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
     confirmarResultado did = do
       r <- tentar (WS.sendTextData conn (Aeson.encode (ResultadoRegistrado did)))
       case r of
-        Left e -> TIO.putStrLn $ "[WS] Falha ao confirmar resultado a " <> widTexto <> ": " <> T.pack (show e)
+        Left e -> registrar "WS" $ "Falha ao confirmar resultado a " <> widTexto <> ": " <> T.pack (show e)
         Right () -> pure ()
 
 -- | Primeiros 200 bytes de uma mensagem, para log (sem despejar mensagens enormes).

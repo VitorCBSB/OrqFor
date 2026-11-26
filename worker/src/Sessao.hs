@@ -12,7 +12,6 @@ import Control.Monad (forM_, forever, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import qualified Network.WebSockets as WS
 import System.Timeout (timeout)
 
@@ -21,6 +20,7 @@ import Configuracao (caminhoWebSocket, intervaloHeartbeatSegundos, portaOrquestr
 import Domain.Protocol
 import Domain.Types
 import Execucao (executarScriptTeste)
+import Log (exibirDemanda, registrar)
 import Pendentes (listarPendentes, removerPendente)
 import Util (tentar)
 
@@ -34,15 +34,15 @@ manterConexao host amb = loop esperaInicial
     esperaMaxima = 60 :: Int
     widTexto = unWorkerId (ambWorkerId amb)
     loop espera = do
-      TIO.putStrLn $ "Conectando ao orquestrador em " <> T.pack host <> ":" <> T.pack (show portaOrquestrador) <> " como " <> widTexto <> "..."
+      registrar "Conexão" $ "Conectando ao orquestrador em " <> T.pack host <> ":" <> T.pack (show portaOrquestrador) <> " como " <> widTexto <> "..."
       r <- tentar (WS.runClient host portaOrquestrador caminhoWebSocket (sessao amb))
       aceito <- case r of
         Right ok -> pure ok
         Left e -> do
-          TIO.putStrLn $ "[Conexão] Falha: " <> T.pack (show e)
+          registrar "Conexão" $ "Falha: " <> T.pack (show e)
           pure False
       let espera' = if aceito then esperaInicial else espera
-      TIO.putStrLn $ "Reconectando em " <> T.pack (show espera') <> " s..."
+      registrar "Conexão" $ "Reconectando em " <> T.pack (show espera') <> " s..."
       threadDelay (espera' * 1000000)
       loop (min esperaMaxima (espera' * 2))
 
@@ -57,7 +57,7 @@ sessao amb conn = do
   mResposta <- timeout 10000000 (WS.receiveData conn :: IO BL.ByteString)
   case mResposta >>= Aeson.decode of
     Just HandshakeAceito -> do
-      TIO.putStrLn "[OK] Handshake aceito pelo orquestrador."
+      registrar "Conexão" "Handshake aceito pelo orquestrador."
       atomically $ writeTVar (ambConexao amb) (Just conn)
       -- Heartbeat em background reportando o estado real do TVar
       hb <- forkIO $ void $ tentar $ forever $ do
@@ -68,21 +68,21 @@ sessao amb conn = do
         killThread hb
         atomically $ writeTVar (ambConexao amb) Nothing
       case resultado of
-        Left e -> TIO.putStrLn $ "[Conexão] Encerrada: " <> T.pack (show e)
-        Right () -> TIO.putStrLn "[Conexão] Encerrada."
+        Left e -> registrar "Conexão" $ "Encerrada: " <> T.pack (show e)
+        Right () -> registrar "Conexão" "Encerrada."
       pure True
     Just (HandshakeRecusado motivo) -> do
-      TIO.putStrLn $ "[ERRO] Conexão recusada: " <> motivo
+      registrar "Conexão" $ "Recusada pelo orquestrador: " <> motivo
       WS.sendClose conn ("Saindo" :: T.Text)
       pure False
     _ -> do
-      TIO.putStrLn "[ERRO] Resposta inválida ou ausente no handshake."
+      registrar "Conexão" "Resposta inválida ou ausente no handshake."
       WS.sendClose conn ("Saindo" :: T.Text)
       pure False
   where
     reenviarPendentes pendentes =
-      forM_ pendentes $ \(DemandaId did, msg) -> do
-        TIO.putStrLn $ "[Pendentes] Reenviando resultado da demanda " <> T.pack (show did)
+      forM_ pendentes $ \(did, msg) -> do
+        registrar "Pendentes" $ "Reenviando resultado da demanda " <> exibirDemanda did
         WS.sendTextData conn (Aeson.encode msg)
 
     -- Loop de comandos vindos do orquestrador; só termina por exceção
@@ -90,7 +90,7 @@ sessao amb conn = do
       cmdRaw <- WS.receiveData c :: IO BL.ByteString
       case Aeson.decode cmdRaw of
         Just (IniciarDemanda demanda) -> do
-          TIO.putStrLn $ "[CMD] Recebida demanda: " <> T.pack (show (demandaId demanda))
+          registrar "Comando" $ "Recebida demanda " <> exibirDemanda (demandaId demanda)
           -- Marca Ocupada ANTES de criar a thread e confirma o recebimento ao
           -- orquestrador, para que heartbeats seguintes nunca informem Livre
           -- com uma demanda em mãos.
@@ -101,9 +101,9 @@ sessao amb conn = do
         Just (ResultadoRegistrado did) ->
           removerPendente (ambDirPendentes amb) did
         Just (CancelarDemanda did) ->
-          TIO.putStrLn $ "[CMD] Cancelamento solicitado para: " <> T.pack (show did)
+          registrar "Comando" $ "Cancelamento solicitado para a demanda " <> exibirDemanda did
         Just SolicitarEstado -> do
           est <- readTVarIO (ambEstado amb)
           WS.sendTextData c (Aeson.encode (HeartbeatWorker est))
         _ ->
-          TIO.putStrLn $ "[Aviso] Mensagem inesperada recebida do servidor: " <> T.pack (show cmdRaw)
+          registrar "Comando" $ "Mensagem inesperada recebida do orquestrador: " <> T.pack (show cmdRaw)
