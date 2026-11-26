@@ -12,7 +12,7 @@ import qualified Data.Map as Map
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import Data.Time (getCurrentTime)
+import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 import Data.Unique (newUnique)
 import Lucid (renderText)
 import qualified Network.Wai.Handler.Warp as Warp
@@ -20,6 +20,7 @@ import Network.Wai.Handler.WebSockets
 import qualified Network.WebSockets as WS
 import System.FilePath
 import System.IO (BufferMode (LineBuffering), hSetBuffering, hSetEncoding, stderr, stdout, utf8)
+import System.Timeout (timeout)
 import Web.Scotty
 import Web.Views.Demandas
 import Web.Views.NovaDemanda (paginaNovaDemanda)
@@ -50,6 +51,10 @@ wsHandler state pending = do
           else do
             agora <- getCurrentTime
             atualizarHeartbeatWorkerDB (stDb state) widTexto agora
+            -- Precisa ocorrer ANTES de registrar o worker no STM: depois do registro
+            -- o despachante pode atribuir uma demanda nova a ele, que seria
+            -- confundida com uma órfã.
+            reconciliarNoHandshake state widTexto estadoInicial
             token <- newUnique
             anterior <- atomically $ registrarWorkerSTM state wid conn estadoInicial token
             -- Reconexão do mesmo worker: encerra a conexão antiga para que o handler
@@ -70,35 +75,94 @@ wsHandler state pending = do
         WS.sendTextData conn (Aeson.encode (HandshakeRecusado "Handshake inválido."))
         WS.sendClose conn ("Protocolo inválido" :: T.Text)
 
+-- | Tempo máximo sem nenhuma mensagem do worker antes de considerar a conexão
+-- morta. O worker envia heartbeat a cada 15 s; 45 s tolera duas perdas.
+limiteSilencioWorker :: Int
+limiteSilencioWorker = 45 * 1000000
+
+-- | Prazo sem heartbeat após o qual as demandas em andamento de um worker
+-- desconectado são consideradas órfãs. Cobre também o reinício do orquestrador:
+-- o worker tem esse tempo para reconectar e informar a demanda que está executando.
+prazoDemandaOrfa :: NominalDiffTime
+prazoDemandaOrfa = 5 * 60
+
+-- | Compara as demandas que o banco diz estarem em andamento no worker com o que
+-- ele informou no handshake. As que ele não está executando foram perdidas
+-- (ex.: a conexão caiu antes de o resultado ser enviado) e vão para ERRO.
+reconciliarNoHandshake :: AppState -> T.Text -> EstadoWorker -> IO ()
+reconciliarNoHandshake state widTexto estadoInformado = do
+  emAndamento <- listarDemandasEmAndamentoDB (stDb state)
+  let executando = case estadoInformado of
+        Ocupada (DemandaId d) -> Just d
+        Livre -> Nothing
+      orfas = [ did | (did, w, _) <- emAndamento, w == widTexto, Just did /= executando ]
+  agora <- getCurrentTime
+  forM_ orfas $ \did -> do
+    let motivo = "O worker " <> widTexto <> " reconectou sem esta demanda em execução; o resultado foi perdido."
+    marcarDemandaOrfaDB (stDb state) did motivo agora
+    TIO.putStrLn $ "[Reconciliação] Demanda #" <> T.pack (show did) <> " marcada como erro: " <> motivo
+
+-- | Periodicamente marca como ERRO as demandas em andamento cujo worker não está
+-- conectado e não envia heartbeat há mais de 'prazoDemandaOrfa'.
+loopVarreduraOrfas :: AppState -> IO ()
+loopVarreduraOrfas state = forever $ do
+  threadDelay (60 * 1000000)
+  resultado <- tentar $ do
+    agora <- getCurrentTime
+    emAndamento <- listarDemandasEmAndamentoDB (stDb state)
+    conectados <- atomically $ listarWorkersConectadosSTM state
+    let semContato hb = maybe True (\t -> diffUTCTime agora t > prazoDemandaOrfa) hb
+        orfas = [ (did, w) | (did, w, hb) <- emAndamento
+                           , WorkerId w `notElem` conectados
+                           , semContato hb ]
+    forM_ orfas $ \(did, w) -> do
+      let motivo = "O worker " <> w <> " ficou sem contato por mais de "
+                   <> T.pack (show (round (prazoDemandaOrfa / 60) :: Int)) <> " min durante o processamento."
+      marcarDemandaOrfaDB (stDb state) did motivo agora
+      TIO.putStrLn $ "[Varredura] Demanda #" <> T.pack (show did) <> " marcada como erro: " <> motivo
+  case resultado of
+    Left e -> TIO.putStrLn $ "[Varredura] Erro na iteração (laço continua): " <> T.pack (show e)
+    Right () -> pure ()
+
+-- | Recebe e processa mensagens do worker até a conexão cair ou o worker ficar
+-- em silêncio por mais de 'limiteSilencioWorker' (conexão meio aberta).
 loopMensagensWorker :: AppState -> WorkerId -> WS.Connection -> IO ()
 loopMensagensWorker state wid@(WorkerId widTexto) conn =
-  forever (do
-    rawData <- WS.receiveData conn :: IO BL.ByteString
-    case Aeson.decode rawData of
-      Just (HeartbeatWorker estadoAtual) -> do
-        agora <- getCurrentTime
-        atualizarHeartbeatWorkerDB (stDb state) widTexto agora
-        atomically $ aplicarHeartbeatSTM state wid estadoAtual
-
-      Just (DemandaAceita did) ->
-        atomically $ confirmarDemandaSTM state wid did
-      Just (AtualizacaoEtapa (DemandaId did) etapa) -> do
-        atualizarEtapaDemandaDB (stDb state) did etapa
-        TIO.putStrLn $ "[WS] " <> widTexto <> " atualizou demanda " <> T.pack (show did) <> " -> " <> T.pack (show etapa)
-
-      Just (DemandaConcluida (DemandaId did) (CaminhoCompartilhado saida)) -> do
-        agora <- getCurrentTime
-        finalizarDemandaDB (stDb state) did Finalizado (Just saida) Nothing agora
-        atomically $ atualizarEstadoWorkerSTM state wid Livre
-        TIO.putStrLn $ "[WS] " <> widTexto <> " concluiu demanda " <> T.pack (show did) <> " em " <> T.pack (show saida)
-
-      Just (DemandaFalhou (DemandaId did) motivo) -> do
-        agora <- getCurrentTime
-        finalizarDemandaDB (stDb state) did (Erro motivo) Nothing (Just motivo) agora
-        atomically $ atualizarEstadoWorkerSTM state wid Livre
-        TIO.putStrLn $ "[WS] " <> widTexto <> " falhou na demanda " <> T.pack (show did) <> ": " <> motivo
-      _ -> pure ()
-  ) `EX.catch` (\(_ :: EX.SomeException) -> pure ())
+  laco `EX.catch` \(e :: EX.SomeException) ->
+    TIO.putStrLn $ "[WS] Conexão com " <> widTexto <> " encerrada: " <> T.pack (show e)
+  where
+    laco = do
+      mRaw <- timeout limiteSilencioWorker (WS.receiveData conn :: IO BL.ByteString)
+      case mRaw of
+        Nothing ->
+          TIO.putStrLn $ "[WS] " <> widTexto <> " sem mensagens há "
+            <> T.pack (show (limiteSilencioWorker `div` 1000000)) <> " s; encerrando a conexão."
+        Just rawData -> processar rawData >> laco
+    processar rawData =
+      case Aeson.decode rawData of
+        Just (HeartbeatWorker estadoAtual) -> do
+          agora <- getCurrentTime
+          atualizarHeartbeatWorkerDB (stDb state) widTexto agora
+          atomically $ aplicarHeartbeatSTM state wid estadoAtual
+  
+        Just (DemandaAceita did) ->
+          atomically $ confirmarDemandaSTM state wid did
+        Just (AtualizacaoEtapa (DemandaId did) etapa) -> do
+          atualizarEtapaDemandaDB (stDb state) did etapa
+          TIO.putStrLn $ "[WS] " <> widTexto <> " atualizou demanda " <> T.pack (show did) <> " -> " <> T.pack (show etapa)
+  
+        Just (DemandaConcluida (DemandaId did) (CaminhoCompartilhado saida)) -> do
+          agora <- getCurrentTime
+          finalizarDemandaDB (stDb state) did Finalizado (Just saida) Nothing agora
+          atomically $ atualizarEstadoWorkerSTM state wid Livre
+          TIO.putStrLn $ "[WS] " <> widTexto <> " concluiu demanda " <> T.pack (show did) <> " em " <> T.pack (show saida)
+  
+        Just (DemandaFalhou (DemandaId did) motivo) -> do
+          agora <- getCurrentTime
+          finalizarDemandaDB (stDb state) did (Erro motivo) Nothing (Just motivo) agora
+          atomically $ atualizarEstadoWorkerSTM state wid Livre
+          TIO.putStrLn $ "[WS] " <> widTexto <> " falhou na demanda " <> T.pack (show did) <> ": " <> motivo
+        _ -> pure ()
 
 -- | Executa uma ação capturando exceções síncronas. Exceções assíncronas
 -- (ex.: ThreadKilled no encerramento do programa) são propagadas.
@@ -179,8 +243,15 @@ main = do
   -- Loop que verifica demandas e aloca para máquinas livres
   void $ forkIO (loopDespachante state)
 
-  -- Warp escuta em todas as interfaces (0.0.0.0) na porta 12000
-  Warp.run 12000 $
+  -- Loop que marca como erro as demandas de workers que sumiram
+  void $ forkIO (loopVarreduraOrfas state)
+
+  -- Warp escuta em todas as interfaces (0.0.0.0) na porta 12000. O timeout de
+  -- inatividade do Warp (padrão 30 s) também derruba conexões WebSocket; ele fica
+  -- acima de 'limiteSilencioWorker' para que a detecção de worker morto seja a
+  -- da aplicação, que registra o motivo no log.
+  let configWarp = Warp.setPort 12000 $ Warp.setTimeout 60 Warp.defaultSettings
+  Warp.runSettings configWarp $
     websocketsOr WS.defaultConnectionOptions (wsHandler state) app
 
 routes :: AppState -> ScottyM ()

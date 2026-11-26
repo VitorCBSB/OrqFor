@@ -12,6 +12,8 @@ module Database
   , buscarProximaDemandaFilaDB
   , atribuirDemandaWorkerDB
   , devolverDemandaParaFilaDB
+  , listarDemandasEmAndamentoDB
+  , marcarDemandaOrfaDB
   , atualizarEtapaDemandaDB
   , finalizarDemandaDB
   ) where
@@ -210,6 +212,26 @@ devolverDemandaParaFilaDB pool did = withDB pool $ \conn ->
   execute conn
     "UPDATE demandas SET worker_id = NULL, estado_id = 1, iniciada_em = NULL WHERE id = ? AND estado_id = 2;"
     (Only did)
+-- | Demandas em andamento (estados 2, 3 e 4) com o worker atribuído e o último
+-- heartbeat desse worker: (id da demanda, id do worker, último heartbeat).
+listarDemandasEmAndamentoDB :: DBPool -> IO [(Int64, Text, Maybe UTCTime)]
+listarDemandasEmAndamentoDB pool = withDB pool $ \conn ->
+  query_ conn
+    "SELECT d.id, d.worker_id, w.ultimo_heartbeat \
+    \FROM demandas d \
+    \JOIN workers w ON w.id = d.worker_id \
+    \WHERE d.estado_id IN (2, 3, 4);"
+
+-- | Marca como ERRO uma demanda órfã (o worker perdeu a demanda ou sumiu).
+-- Só age se ela ainda estiver em andamento, para não sobrescrever um resultado
+-- que tenha chegado nesse meio-tempo.
+marcarDemandaOrfaDB :: DBPool -> Int64 -> Text -> UTCTime -> IO ()
+marcarDemandaOrfaDB pool did motivo agora = withDB pool $ \conn ->
+  execute conn
+    "UPDATE demandas SET estado_id = 6, mensagem_erro = ?, concluida_em = ? \
+    \WHERE id = ? AND estado_id IN (2, 3, 4);"
+    (motivo, agora, did)
+
 -- | Atualiza apenas a etapa atual da demanda no banco
 atualizarEtapaDemandaDB :: DBPool -> Int64 -> EtapaProcessamento -> IO ()
 atualizarEtapaDemandaDB pool did etapa = withDB pool $ \conn ->
