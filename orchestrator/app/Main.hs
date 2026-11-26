@@ -7,6 +7,7 @@ import Control.Concurrent.STM
 import qualified Control.Exception as EX
 import Control.Monad
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map as Map
 import Data.Maybe (isJust)
@@ -28,6 +29,7 @@ import Web.Views.Demandas
 import Web.Views.NovaDemanda (paginaNovaDemanda)
 
 import AppState
+import Configuracao (caminhoWebSocket, intervaloHeartbeatSegundos, portaOrquestrador)
 import Database
 import Domain.Protocol
 import Domain.Types
@@ -38,7 +40,18 @@ lerCheckbox nome = isJust . lookup nome <$> formParams
 
 -- | Gerencia o ciclo de vida de cada Worker conectado via WebSocket
 wsHandler :: AppState -> WS.ServerApp
-wsHandler state pending = do
+wsHandler state pending
+  | caminho /= BS8.pack caminhoWebSocket = do
+      TIO.putStrLn $ "[WS] Conexão WebSocket recusada: caminho " <> TE.decodeUtf8With TEE.lenientDecode caminho
+        <> " (esperado " <> T.pack caminhoWebSocket <> ")."
+      WS.rejectRequest pending "Caminho WebSocket inválido."
+  | otherwise = aceitarWorker state pending
+  where
+    caminho = WS.requestPath (WS.pendingRequest pending)
+
+-- | Handshake e ciclo de vida de um worker cuja conexão chegou no caminho correto.
+aceitarWorker :: AppState -> WS.PendingConnection -> IO ()
+aceitarWorker state pending = do
   conn <- WS.acceptRequest pending
   WS.withPingThread conn 30 (pure ()) $ do
     rawMsg <- WS.receiveData conn :: IO BL.ByteString
@@ -81,10 +94,10 @@ wsHandler state pending = do
         WS.sendTextData conn (Aeson.encode (HandshakeRecusado "Handshake inválido."))
         WS.sendClose conn ("Protocolo inválido" :: T.Text)
 
--- | Tempo máximo sem nenhuma mensagem do worker antes de considerar a conexão
--- morta. O worker envia heartbeat a cada 15 s; 45 s tolera duas perdas.
-limiteSilencioWorker :: Int
-limiteSilencioWorker = 45 * 1000000
+-- | Tempo máximo, em segundos, sem nenhuma mensagem do worker antes de considerar
+-- a conexão morta. Três intervalos de heartbeat toleram duas perdas seguidas.
+limiteSilencioSegundos :: Int
+limiteSilencioSegundos = 3 * intervaloHeartbeatSegundos
 
 -- | Prazo sem heartbeat após o qual as demandas em andamento de um worker
 -- desconectado são consideradas órfãs. Cobre também o reinício do orquestrador:
@@ -133,7 +146,7 @@ loopVarreduraOrfas state = forever $ do
     Right () -> pure ()
 
 -- | Recebe e processa mensagens do worker até a conexão cair ou o worker ficar
--- em silêncio por mais de 'limiteSilencioWorker' (conexão meio aberta).
+-- em silêncio por mais de 'limiteSilencioSegundos' (conexão meio aberta).
 loopMensagensWorker :: AppState -> WorkerId -> WS.Connection -> IO ()
 loopMensagensWorker state wid@(WorkerId widTexto) conn = do
   -- Falhas de conexão (fechamento, erro de socket) encerram o laço e são
@@ -144,11 +157,11 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
     Right () -> pure ()
   where
     laco = do
-      mRaw <- timeout limiteSilencioWorker (WS.receiveData conn :: IO BL.ByteString)
+      mRaw <- timeout (limiteSilencioSegundos * 1000000) (WS.receiveData conn :: IO BL.ByteString)
       case mRaw of
         Nothing ->
           TIO.putStrLn $ "[WS] " <> widTexto <> " sem mensagens há "
-            <> T.pack (show (limiteSilencioWorker `div` 1000000)) <> " s; encerrando a conexão."
+            <> T.pack (show limiteSilencioSegundos) <> " s; encerrando a conexão."
         Just rawData -> do
           -- Uma falha ao processar uma mensagem (ex.: erro no banco) é registrada
           -- sem derrubar a conexão.
@@ -279,7 +292,7 @@ main = do
              ("orchestrator" </> "sql" </> "schema.sql")
   state <- novoAppState pool
 
-  putStrLn "Orquestrador (HTTP + WS) escutando em 0.0.0.0:12000"
+  putStrLn $ "Orquestrador (HTTP + WS) escutando em 0.0.0.0:" <> show portaOrquestrador
 
   app <- scottyApp $ routes state
 
@@ -289,11 +302,12 @@ main = do
   -- Loop que marca como erro as demandas de workers que sumiram
   void $ forkIO (loopVarreduraOrfas state)
 
-  -- Warp escuta em todas as interfaces (0.0.0.0) na porta 12000. O timeout de
+  -- Warp escuta em todas as interfaces (0.0.0.0) na porta configurada. O timeout de
   -- inatividade do Warp (padrão 30 s) também derruba conexões WebSocket; ele fica
-  -- acima de 'limiteSilencioWorker' para que a detecção de worker morto seja a
-  -- da aplicação, que registra o motivo no log.
-  let configWarp = Warp.setPort 12000 $ Warp.setTimeout 60 Warp.defaultSettings
+  -- 15 s acima de 'limiteSilencioSegundos' para que a detecção de worker morto
+  -- seja a da aplicação, que registra o motivo no log.
+  let configWarp = Warp.setPort portaOrquestrador
+                 $ Warp.setTimeout (limiteSilencioSegundos + 15) Warp.defaultSettings
   Warp.runSettings configWarp $
     websocketsOr WS.defaultConnectionOptions (wsHandler state) app
 

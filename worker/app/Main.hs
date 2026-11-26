@@ -12,6 +12,7 @@ import Data.List (isSuffixOf)
 import Data.Maybe (catMaybes)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import Configuracao (caminhoWebSocket, intervaloHeartbeatSegundos, portaOrquestrador)
 import Domain.Protocol
 import Domain.Types
 import qualified Network.WebSockets as WS
@@ -155,7 +156,7 @@ sessao dirPendentes wid varEstado varConn conn = do
       atomically $ writeTVar varConn (Just conn)
       -- Heartbeat em background reportando o estado real do TVar
       hb <- forkIO $ void $ tentar $ forever $ do
-        threadDelay 15000000
+        threadDelay (intervaloHeartbeatSegundos * 1000000)
         est <- readTVarIO varEstado
         WS.sendTextData conn (Aeson.encode (HeartbeatWorker est))
       resultado <- tentar (reenviarPendentes pendentes >> comandos conn) `EX.finally` do
@@ -226,8 +227,8 @@ main = do
   let esperaInicial = 2 :: Int
       esperaMaxima = 60 :: Int
       loop espera = do
-        TIO.putStrLn $ "Conectando ao orquestrador em " <> T.pack host <> ":12000 como " <> widTexto <> "..."
-        r <- tentar (WS.runClient host 12000 "/ws" (sessao dirPendentes wid varEstado varConn))
+        TIO.putStrLn $ "Conectando ao orquestrador em " <> T.pack host <> ":" <> T.pack (show portaOrquestrador) <> " como " <> widTexto <> "..."
+        r <- tentar (WS.runClient host portaOrquestrador caminhoWebSocket (sessao dirPendentes wid varEstado varConn))
         aceito <- case r of
           Right ok -> pure ok
           Left e -> do
