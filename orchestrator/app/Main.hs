@@ -11,6 +11,8 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map as Map
 import Data.Maybe (isJust)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Text.IO as TIO
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 import Data.Unique (newUnique)
@@ -40,8 +42,8 @@ wsHandler state pending = do
   conn <- WS.acceptRequest pending
   WS.withPingThread conn 30 (pure ()) $ do
     rawMsg <- WS.receiveData conn :: IO BL.ByteString
-    case Aeson.decode rawMsg of
-      Just (HandshakeWorker wid@(WorkerId widTexto) estadoInicial) -> do
+    case Aeson.eitherDecode rawMsg of
+      Right (HandshakeWorker wid@(WorkerId widTexto) estadoInicial) -> do
         conhecido <- validarWorkerDB (stDb state) widTexto
         if not conhecido
           then do
@@ -71,7 +73,11 @@ wsHandler state pending = do
                 atomically $ removerWorkerSTM state wid token
                 TIO.putStrLn $ "[WS] Worker desconectado: " <> widTexto
 
-      _ -> do
+      outra -> do
+        let detalhe = case outra of
+              Left erro -> "não decodificou (" <> T.pack erro <> ")"
+              Right _ -> "a primeira mensagem não é um handshake"
+        TIO.putStrLn $ "[WS] Handshake inválido: " <> detalhe <> ". Início da mensagem: " <> trechoMensagem rawMsg
         WS.sendTextData conn (Aeson.encode (HandshakeRecusado "Handshake inválido."))
         WS.sendClose conn ("Protocolo inválido" :: T.Text)
 
@@ -127,9 +133,13 @@ loopVarreduraOrfas state = forever $ do
 -- | Recebe e processa mensagens do worker até a conexão cair ou o worker ficar
 -- em silêncio por mais de 'limiteSilencioWorker' (conexão meio aberta).
 loopMensagensWorker :: AppState -> WorkerId -> WS.Connection -> IO ()
-loopMensagensWorker state wid@(WorkerId widTexto) conn =
-  laco `EX.catch` \(e :: EX.SomeException) ->
-    TIO.putStrLn $ "[WS] Conexão com " <> widTexto <> " encerrada: " <> T.pack (show e)
+loopMensagensWorker state wid@(WorkerId widTexto) conn = do
+  -- Falhas de conexão (fechamento, erro de socket) encerram o laço e são
+  -- registradas. Exceções assíncronas (ex.: ThreadKilled) são repropagadas.
+  resultado <- tentar laco
+  case resultado of
+    Left e -> TIO.putStrLn $ "[WS] Conexão com " <> widTexto <> " encerrada: " <> T.pack (show e)
+    Right () -> pure ()
   where
     laco = do
       mRaw <- timeout limiteSilencioWorker (WS.receiveData conn :: IO BL.ByteString)
@@ -137,32 +147,51 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn =
         Nothing ->
           TIO.putStrLn $ "[WS] " <> widTexto <> " sem mensagens há "
             <> T.pack (show (limiteSilencioWorker `div` 1000000)) <> " s; encerrando a conexão."
-        Just rawData -> processar rawData >> laco
+        Just rawData -> do
+          -- Uma falha ao processar uma mensagem (ex.: erro no banco) é registrada
+          -- sem derrubar a conexão.
+          r <- tentar (processar rawData)
+          case r of
+            Left e -> TIO.putStrLn $ "[WS] Erro ao processar mensagem de " <> widTexto
+                        <> " (conexão mantida): " <> T.pack (show e)
+            Right () -> pure ()
+          laco
     processar rawData =
-      case Aeson.decode rawData of
-        Just (HeartbeatWorker estadoAtual) -> do
+      case Aeson.eitherDecode rawData of
+        Left erro ->
+          TIO.putStrLn $ "[WS] Mensagem não reconhecida de " <> widTexto <> " (" <> T.pack erro
+            <> "). Worker e orquestrador estão na mesma versão do protocolo? Início da mensagem: "
+            <> trechoMensagem rawData
+        Right HandshakeWorker{} ->
+          TIO.putStrLn $ "[WS] " <> widTexto <> " enviou um handshake repetido; ignorado."
+        Right (HeartbeatWorker estadoAtual) -> do
           agora <- getCurrentTime
           atualizarHeartbeatWorkerDB (stDb state) widTexto agora
           atomically $ aplicarHeartbeatSTM state wid estadoAtual
   
-        Just (DemandaAceita did) ->
+        Right (DemandaAceita did) ->
           atomically $ confirmarDemandaSTM state wid did
-        Just (AtualizacaoEtapa (DemandaId did) etapa) -> do
+        Right (AtualizacaoEtapa (DemandaId did) etapa) -> do
           atualizarEtapaDemandaDB (stDb state) did etapa
           TIO.putStrLn $ "[WS] " <> widTexto <> " atualizou demanda " <> T.pack (show did) <> " -> " <> T.pack (show etapa)
   
-        Just (DemandaConcluida (DemandaId did) (CaminhoCompartilhado saida)) -> do
+        Right (DemandaConcluida (DemandaId did) (CaminhoCompartilhado saida)) -> do
           agora <- getCurrentTime
           finalizarDemandaDB (stDb state) did Finalizado (Just saida) Nothing agora
           atomically $ atualizarEstadoWorkerSTM state wid Livre
           TIO.putStrLn $ "[WS] " <> widTexto <> " concluiu demanda " <> T.pack (show did) <> " em " <> T.pack (show saida)
   
-        Just (DemandaFalhou (DemandaId did) motivo) -> do
+        Right (DemandaFalhou (DemandaId did) motivo) -> do
           agora <- getCurrentTime
           finalizarDemandaDB (stDb state) did (Erro motivo) Nothing (Just motivo) agora
           atomically $ atualizarEstadoWorkerSTM state wid Livre
           TIO.putStrLn $ "[WS] " <> widTexto <> " falhou na demanda " <> T.pack (show did) <> ": " <> motivo
-        _ -> pure ()
+
+-- | Primeiros 200 bytes de uma mensagem, para log (sem despejar mensagens enormes).
+trechoMensagem :: BL.ByteString -> T.Text
+trechoMensagem msg =
+  TE.decodeUtf8With TEE.lenientDecode (BL.toStrict (BL.take 200 msg))
+    <> (if BL.length msg > 200 then "..." else "")
 
 -- | Executa uma ação capturando exceções síncronas. Exceções assíncronas
 -- (ex.: ThreadKilled no encerramento do programa) são propagadas.
