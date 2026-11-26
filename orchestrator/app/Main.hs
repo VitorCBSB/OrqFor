@@ -43,7 +43,7 @@ wsHandler state pending = do
   WS.withPingThread conn 30 (pure ()) $ do
     rawMsg <- WS.receiveData conn :: IO BL.ByteString
     case Aeson.eitherDecode rawMsg of
-      Right (HandshakeWorker wid@(WorkerId widTexto) estadoInicial) -> do
+      Right (HandshakeWorker wid@(WorkerId widTexto) estadoInicial pendentes) -> do
         conhecido <- validarWorkerDB (stDb state) widTexto
         if not conhecido
           then do
@@ -56,7 +56,7 @@ wsHandler state pending = do
             -- Precisa ocorrer ANTES de registrar o worker no STM: depois do registro
             -- o despachante pode atribuir uma demanda nova a ele, que seria
             -- confundida com uma órfã.
-            reconciliarNoHandshake state widTexto estadoInicial
+            reconciliarNoHandshake state widTexto estadoInicial pendentes
             token <- newUnique
             anterior <- atomically $ registrarWorkerSTM state wid conn estadoInicial token
             -- Reconexão do mesmo worker: encerra a conexão antiga para que o handler
@@ -93,15 +93,17 @@ prazoDemandaOrfa :: NominalDiffTime
 prazoDemandaOrfa = 5 * 60
 
 -- | Compara as demandas que o banco diz estarem em andamento no worker com o que
--- ele informou no handshake. As que ele não está executando foram perdidas
--- (ex.: a conexão caiu antes de o resultado ser enviado) e vão para ERRO.
-reconciliarNoHandshake :: AppState -> T.Text -> EstadoWorker -> IO ()
-reconciliarNoHandshake state widTexto estadoInformado = do
+-- ele informou no handshake. As que ele não está executando e para as quais não
+-- tem resultado pendente de reenvio foram perdidas e vão para ERRO.
+reconciliarNoHandshake :: AppState -> T.Text -> EstadoWorker -> [DemandaId] -> IO ()
+reconciliarNoHandshake state widTexto estadoInformado pendentes = do
   emAndamento <- listarDemandasEmAndamentoDB (stDb state)
   let executando = case estadoInformado of
         Ocupada (DemandaId d) -> Just d
         Livre -> Nothing
-      orfas = [ did | (did, w, _) <- emAndamento, w == widTexto, Just did /= executando ]
+      comResultadoPendente did = DemandaId did `elem` pendentes
+      orfas = [ did | (did, w, _) <- emAndamento, w == widTexto
+                    , Just did /= executando, not (comResultadoPendente did) ]
   agora <- getCurrentTime
   forM_ orfas $ \did -> do
     let motivo = "O worker " <> widTexto <> " reconectou sem esta demanda em execução; o resultado foi perdido."
@@ -178,14 +180,26 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
         Right (DemandaConcluida (DemandaId did) (CaminhoCompartilhado saida)) -> do
           agora <- getCurrentTime
           finalizarDemandaDB (stDb state) did Finalizado (Just saida) Nothing agora
-          atomically $ atualizarEstadoWorkerSTM state wid Livre
+          atomically $ liberarWorkerSTM state wid (DemandaId did)
           TIO.putStrLn $ "[WS] " <> widTexto <> " concluiu demanda " <> T.pack (show did) <> " em " <> T.pack (show saida)
+          confirmarResultado (DemandaId did)
   
         Right (DemandaFalhou (DemandaId did) motivo) -> do
           agora <- getCurrentTime
           finalizarDemandaDB (stDb state) did (Erro motivo) Nothing (Just motivo) agora
-          atomically $ atualizarEstadoWorkerSTM state wid Livre
+          atomically $ liberarWorkerSTM state wid (DemandaId did)
           TIO.putStrLn $ "[WS] " <> widTexto <> " falhou na demanda " <> T.pack (show did) <> ": " <> motivo
+          confirmarResultado (DemandaId did)
+
+    -- Avisa o worker que o resultado foi gravado, para ele descartar a cópia
+    -- local. Só é chamado depois da gravação no banco: se ela falhar, a exceção
+    -- impede a confirmação e o worker reenvia na próxima conexão. Uma falha no
+    -- envio da confirmação também só causa um reenvio (a gravação é idempotente).
+    confirmarResultado did = do
+      r <- tentar (WS.sendTextData conn (Aeson.encode (ResultadoRegistrado did)))
+      case r of
+        Left e -> TIO.putStrLn $ "[WS] Falha ao confirmar resultado a " <> widTexto <> ": " <> T.pack (show e)
+        Right () -> pure ()
 
 -- | Primeiros 200 bytes de uma mensagem, para log (sem despejar mensagens enormes).
 trechoMensagem :: BL.ByteString -> T.Text

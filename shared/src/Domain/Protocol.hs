@@ -15,6 +15,9 @@ data MsgParaWorker
   | SolicitarEstado
   | HandshakeAceito 
   | HandshakeRecusado Text
+  | ResultadoRegistrado DemandaId
+    -- ^ O resultado final ('DemandaConcluida'/'DemandaFalhou') foi gravado no
+    -- banco; o worker pode descartar a cópia guardada para reenvio.
   deriving stock (Show, Eq, Generic)
 
 instance ToJSON MsgParaWorker
@@ -25,6 +28,9 @@ data MsgDoWorker
   = HandshakeWorker
       { hwWorkerId    :: WorkerId
       , hwEstadoAtual :: EstadoWorker  -- Crucial para recuperação após queda de rede
+      , hwResultadosPendentes :: [DemandaId]
+        -- ^ Demandas cujo resultado final ainda não foi confirmado pelo
+        -- orquestrador; o worker os reenvia logo após o handshake.
       }
   | HeartbeatWorker EstadoWorker
   | DemandaAceita   -- Confirma o recebimento de 'IniciarDemanda'; o worker já está Ocupada

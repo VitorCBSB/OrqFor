@@ -6,7 +6,9 @@ module AppState
   , novoAppState
   , atualizarEstadoWorkerSTM
   , aplicarHeartbeatSTM
-  , confirmarDemandaSTM  , registrarWorkerSTM
+  , confirmarDemandaSTM
+  , liberarWorkerSTM
+  , registrarWorkerSTM
   , removerWorkerSTM
   , listarWorkersConectadosSTM
   ) where
@@ -73,6 +75,17 @@ aplicarHeartbeatSTM st wid estadoInformado =
     aplicar cw
       | not (cwConfirmada cw), estadoInformado == Livre = cw
       | otherwise = cw { cwEstado = estadoInformado, cwConfirmada = True }
+
+-- | Marca o worker como Livre ao receber o resultado final de uma demanda, mas
+-- somente se ele estiver ocupado com essa mesma demanda. Um resultado reenviado
+-- após reconexão pode chegar quando o worker já está executando outra demanda.
+liberarWorkerSTM :: AppState -> WorkerId -> DemandaId -> STM ()
+liberarWorkerSTM st wid did =
+  modifyTVar' (stWorkersAtivos st) $ Map.adjust liberar wid
+  where
+    liberar cw
+      | cwEstado cw == Ocupada did = cw { cwEstado = Livre, cwConfirmada = True }
+      | otherwise = cw
 
 -- | Registra que o worker confirmou o recebimento da demanda despachada.
 confirmarDemandaSTM :: AppState -> WorkerId -> DemandaId -> STM ()
