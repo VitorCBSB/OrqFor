@@ -190,6 +190,11 @@ routes state = do
     demandas <- liftIO $ listarDemandasDB (stDb state)
     html $ renderText (paginaDemandas demandas)
 
+  -- Fragmento HTML da lista de demandas, consumido pelo polling do htmx em "/"
+  get "/fragmento-demandas" $ do
+    demandas <- liftIO $ listarDemandasDB (stDb state)
+    html $ renderText (fragmentoListaDemandas demandas)
+
   get "/nova-demanda" $
     html $ renderText paginaNovaDemanda
 

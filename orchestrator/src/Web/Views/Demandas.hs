@@ -9,6 +9,7 @@ import Data.Maybe (fromMaybe)
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, minutesToTimeZone, utcToLocalTime)
 import Data.Text (Text, pack)
 import Lucid
+import Lucid.Base (makeAttribute)
 import Web.Views.Layout
 
 import Database
@@ -19,7 +20,12 @@ paginaDemandas demandas = layoutBase "Orquestrador PA / IPED" $ do
     h1_ "Fila de Execução"
     a_ [href_ "/nova-demanda", role_ "button"] "+ Nova Demanda"
 
-  div_ [id_ "container-fila"] $
+  -- Atualiza a lista a cada 5 s buscando apenas o fragmento (htmx)
+  div_ [ id_ "container-fila"
+       , makeAttribute "hx-get" "/fragmento-demandas"
+       , makeAttribute "hx-trigger" "every 5s"
+       , makeAttribute "hx-swap" "innerHTML"
+       ] $
     fragmentoListaDemandas demandas
 
 fragmentoListaDemandas :: [DemandaResumo] -> Html ()
