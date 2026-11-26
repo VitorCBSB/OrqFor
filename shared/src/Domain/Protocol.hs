@@ -40,7 +40,7 @@ data MsgDoWorker
       }
   | DemandaFalhou
       { dfDemandaId :: DemandaId
-      , dfEtapa     :: EtapaProcessamento -- Ex: Erro "Timeout no IPED"
+      , dfMotivo    :: Text -- Ex: "Timeout no IPED". A demanda sempre vai para ERRO.
       }
   deriving stock (Show, Eq, Generic)
 

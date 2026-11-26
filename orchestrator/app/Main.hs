@@ -92,14 +92,11 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn =
         atomically $ atualizarEstadoWorkerSTM state wid Livre
         TIO.putStrLn $ "[WS] " <> widTexto <> " concluiu demanda " <> T.pack (show did) <> " em " <> T.pack (show saida)
 
-      Just (DemandaFalhou (DemandaId did) etapaErro) -> do
+      Just (DemandaFalhou (DemandaId did) motivo) -> do
         agora <- getCurrentTime
-        let msgErro = case etapaErro of
-              Erro txt -> txt
-              outra -> T.pack (show outra)
-        finalizarDemandaDB (stDb state) did etapaErro Nothing (Just msgErro) agora
+        finalizarDemandaDB (stDb state) did (Erro motivo) Nothing (Just motivo) agora
         atomically $ atualizarEstadoWorkerSTM state wid Livre
-        TIO.putStrLn $ "[WS] " <> widTexto <> " falhou na demanda " <> T.pack (show did) <> ": " <> T.pack (show etapaErro)
+        TIO.putStrLn $ "[WS] " <> widTexto <> " falhou na demanda " <> T.pack (show did) <> ": " <> motivo
       _ -> pure ()
   ) `EX.catch` (\(_ :: EX.SomeException) -> pure ())
 

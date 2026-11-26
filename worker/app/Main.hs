@@ -66,7 +66,7 @@ executarScriptTeste varConn varEstado demanda = do
     ExitFailure codigo -> do
       let motivo = "AutoHotkey retornou erro (código " <> T.pack (show codigo) <> "): " <> T.pack stderrStr
       TIO.putStrLn $ "[Execução] " <> motivo
-      enviarSePossivel varConn (DemandaFalhou did (Erro motivo))
+      enviarSePossivel varConn (DemandaFalhou did motivo)
 
   atomically $ writeTVar varEstado Livre
 
