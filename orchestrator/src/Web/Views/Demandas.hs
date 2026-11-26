@@ -5,14 +5,13 @@ module Web.Views.Demandas
   , fragmentoListaDemandas
   ) where
 
-import Data.Text (Text)
 import Data.Maybe (fromMaybe)
-import Data.Time
+import Data.Time (UTCTime, defaultTimeLocale, formatTime, minutesToTimeZone, utcToLocalTime)
+import Data.Text (Text, pack)
 import Lucid
 import Web.Views.Layout
 
 import Database
-import Domain.Types
 
 paginaDemandas :: [DemandaResumo] -> Html ()
 paginaDemandas demandas = layoutBase "Orquestrador PA / IPED" $ do
@@ -31,11 +30,10 @@ fragmentoListaDemandas demandas =
       tr_ $ do
         th_ "ID"
         th_ "Solicitante"
-        th_ "Diretório"
-        th_ "Produto Final"
-        th_ "Etapas"
+        th_ "SP"
         th_ "Status"
         th_ "Máquina"
+        th_ "Submetida Em"
     tbody_ $
       mapM_ renderLinha demandas
   where
@@ -47,16 +45,13 @@ fragmentoListaDemandas demandas =
           then span_ [style_ "margin-left: 0.5rem; color: #c62828; font-weight: bold"] "[URGENTE]"
           else pure ()
       td_ $ toHtml (drUsuarioNome d <> " (" <> drMatricula d <> ")")
-      td_ $ code_ (toHtml (drDiretorio d))
-      td_ $ toHtml (drProdutoFinal d)
-      td_ $ toHtml (resumoEtapas (drConfig d))
+      td_ $ toHtml ((pack $ show $ drSPNum d) <> "/" <> (pack $ show $ drSPAno d))
       td_ $ toHtml (drEstadoDesc d)
       td_ $ toHtml (fromMaybe "-" (drWorkerId d))
+      td_ $ toHtml (formatarHoraBrasilia $ drSubmetidaEm d)
 
-    resumoEtapas :: ConfigProcessamento -> Text
-    resumoEtapas cfg =
-      case (gerarRelatorioPA cfg, executarIndexacaoIPED cfg) of
-        (True, True)   -> "PA + IPED (" <> perfilIPED cfg <> ")"
-        (True, False)  -> "Somente PA"
-        (False, True)  -> "Somente IPED (" <> perfilIPED cfg <> ")"
-        (False, False) -> "Nenhuma etapa selecionada"
+formatarHoraBrasilia :: UTCTime -> Text
+formatarHoraBrasilia utc =
+  let fusoBrasilia = minutesToTimeZone (-180) -- GMT-3
+      local = utcToLocalTime fusoBrasilia utc
+  in pack (formatTime defaultTimeLocale "%d/%m/%Y %H:%M" local)

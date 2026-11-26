@@ -96,34 +96,66 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn =
       _ -> pure ()
   ) `EX.catch` (\(_ :: EX.SomeException) -> pure ())
 
--- | Procura demandas NA_FILA e envia para o primeiro worker Livre conectado
+-- | Executa uma ação capturando exceções síncronas. Exceções assíncronas
+-- (ex.: ThreadKilled no encerramento do programa) são propagadas.
+tentar :: IO a -> IO (Either EX.SomeException a)
+tentar acao = do
+  r <- EX.try acao
+  case r of
+    Left e | Just (ae :: EX.SomeAsyncException) <- EX.fromException e -> EX.throwIO ae
+    _ -> pure r
+
+-- | Procura demandas NA_FILA e envia para o primeiro worker Livre conectado.
+-- Uma falha em qualquer iteração é registrada e o laço continua.
 loopDespachante :: AppState -> IO ()
 loopDespachante state = forever $ do
   threadDelay 3000000 -- 3 segundos
+  resultado <- tentar (despacharProxima state)
+  case resultado of
+    Left e -> TIO.putStrLn $ "[Despachante] Erro na iteração (laço continua): " <> T.pack (show e)
+    Right () -> pure ()
+
+-- | Uma iteração do despachante: reserva um worker, atribui a demanda no banco
+-- e a envia. Se algo falhar no meio, desfaz o que já foi feito.
+despacharProxima :: AppState -> IO ()
+despacharProxima state = do
   mDemanda <- buscarProximaDemandaFilaDB (stDb state)
   case mDemanda of
     Nothing -> pure ()
     Just demanda -> do
-      -- Procura um worker Livre no STM e já o marca como ocupado localmente
+      let DemandaId did = demandaId demanda
+      -- Reserva o worker no STM para evitar envio duplo
       mWorkerLivre <- atomically $ do
         mapa <- readTVar (stWorkersAtivos state)
         case filter (\(_, cw) -> cwEstado cw == Livre) (Map.toList mapa) of
           [] -> pure Nothing
           ((wid, cw) : _) -> do
-            -- Atualiza estado no STM imediatamente para evitar envio duplo
             writeTVar (stWorkersAtivos state)
               (Map.insert wid (cw { cwEstado = Ocupada (demandaId demanda) }) mapa)
             pure (Just (wid, cwConn cw))
-
       case mWorkerLivre of
         Nothing -> pure () -- Nenhum worker livre no momento
         Just (wid@(WorkerId widTexto), conn) -> do
           agora <- getCurrentTime
-          let DemandaId did = demandaId demanda
-          atribuirDemandaWorkerDB (stDb state) did widTexto agora
+          -- Passo 1: atribuição no banco. Se falhar, nada foi enviado e o worker
+          -- continua utilizável: libera a reserva e propaga o erro.
+          atribuido <- tentar (atribuirDemandaWorkerDB (stDb state) did widTexto agora)
+          case atribuido of
+            Left e -> do
+              atomically $ atualizarEstadoWorkerSTM state wid Livre
+              EX.throwIO e
+            Right () -> pure ()
           TIO.putStrLn $ "[Despachante] Enviando demanda #" <> T.pack (show did) <> " para " <> widTexto
-          WS.sendTextData conn (Aeson.encode (IniciarDemanda demanda))
-
+          -- Passo 2: envio. Se falhar, a conexão provavelmente caiu; devolve a
+          -- demanda para a fila. O worker permanece reservado até o handler da
+          -- conexão removê-lo do mapa (ou até o próximo heartbeat dele).
+          enviado <- tentar (WS.sendTextData conn (Aeson.encode (IniciarDemanda demanda)))
+          case enviado of
+            Left e -> do
+              TIO.putStrLn $ "[Despachante] Falha ao enviar demanda #" <> T.pack (show did)
+                <> " para " <> widTexto <> "; devolvendo à fila: " <> T.pack (show e)
+              devolverDemandaParaFilaDB (stDb state) did
+            Right () -> pure ()
 main :: IO ()
 main = do
   hSetEncoding stdout utf8
@@ -158,27 +190,31 @@ routes state = do
     nome      <- formParam "usuarioNome"
     matricula <- formParam "usuarioMatricula"
     email     <- formParam "usuarioEmail"
-    diretorio <- formParam "demandaDiretorio"
-    produto   <- formParam "nomeProdutoFinal"
     perfil    <- formParam "perfilIPED"
+    spNum     <- formParam "spNum"
+    spAno     <- formParam "spAno"
     urgente   <- lerCheckbox "urgente"
-    usarPA    <- lerCheckbox "gerarRelatorioPA"
-    usarIPED  <- lerCheckbox "executarIndexacaoIPED"
+    exportar  <- lerCheckbox "exportarIPED"
 
     let solicitante = Usuario
           { usuarioNome      = T.strip nome
           , usuarioMatricula = Matricula (T.strip matricula)
           , usuarioEmail     = Email (T.strip email)
           }
-        caminho = CaminhoCompartilhado (T.strip diretorio)
         config  = ConfigProcessamento
-          { nomeProdutoFinal      = T.strip produto
-          , gerarRelatorioPA      = usarPA
-          , executarIndexacaoIPED = usarIPED
-          , perfilIPED            = perfil
-          , opcoesExtras          = []
+          { exportarIPED = exportar
+          , perfilIPED   = readPerfilIPED perfil
           }
 
     agora <- liftIO getCurrentTime
-    _ <- liftIO $ inserirDemandaDB (stDb state) solicitante caminho config urgente agora
+    _ <- liftIO $ inserirDemandaDB (stDb state) solicitante config urgente (SolicitacaoPericial spNum spAno) agora
     redirect "/"
+
+readPerfilIPED :: T.Text -> IPEDProfile
+readPerfilIPED "default" = IPEDDefault
+readPerfilIPED "blind" = Blind
+readPerfilIPED "fastmode" = Fastmode
+readPerfilIPED "forensic" = Forensic
+readPerfilIPED "pedo" = Pedo
+readPerfilIPED "triage" = Triage
+readPerfilIPED str = error $ "Perfil IPED desconhecido: " <> (T.unpack str)

@@ -11,6 +11,7 @@ module Database
   , atualizarHeartbeatWorkerDB
   , buscarProximaDemandaFilaDB
   , atribuirDemandaWorkerDB
+  , devolverDemandaParaFilaDB
   , atualizarEtapaDemandaDB
   , finalizarDemandaDB
   ) where
@@ -38,9 +39,9 @@ data DemandaResumo = DemandaResumo
   { drId            :: Int64
   , drUsuarioNome   :: Text
   , drMatricula     :: Text
-  , drDiretorio     :: Text
-  , drProdutoFinal  :: Text
   , drConfig        :: ConfigProcessamento
+  , drSPNum         :: Int
+  , drSPAno         :: Int
   , drUrgente       :: Bool
   , drEstadoCodigo  :: Text
   , drEstadoDesc    :: Text
@@ -54,17 +55,17 @@ instance FromRow DemandaResumo where
     drId           <- field
     drUsuarioNome  <- field
     drMatricula    <- field
-    drDiretorio    <- field
-    drProdutoFinal <- field
     cfgTexto       <- field :: RowParser Text
     drUrgente      <- field
+    drSPNum        <- field
+    drSPAno        <- field
     drEstadoCodigo <- field
     drEstadoDesc   <- field
     drWorkerId     <- field
     drMensagemErro <- field
     drSubmetidaEm  <- field
 
-    let cfgPadrao = ConfigProcessamento drProdutoFinal False False "default" []
+    let cfgPadrao = ConfigProcessamento False IPEDDefault
         drConfig  = fromMaybe cfgPadrao (decodeStrict (encodeUtf8 cfgTexto))
 
     pure DemandaResumo{..}
@@ -100,12 +101,12 @@ executarArquivoSQL conn caminhoSQL = do
 inserirDemandaDB
   :: DBPool
   -> Usuario
-  -> CaminhoCompartilhado
   -> ConfigProcessamento
   -> Bool
+  -> SolicitacaoPericial
   -> UTCTime
   -> IO Demanda
-inserirDemandaDB pool usr@Usuario{..} caminho cfg urgente agora = withDB pool $ \conn ->
+inserirDemandaDB pool usr@Usuario{..} cfg urgente sp agora = withDB pool $ \conn ->
   withTransaction conn $ do
     -- Upsert do usuário solicitante
     execute conn
@@ -121,13 +122,13 @@ inserirDemandaDB pool usr@Usuario{..} caminho cfg urgente agora = withDB pool $ 
 
     execute conn
       "INSERT INTO demandas \
-      \  (usuario_email, estado_id, diretorio_entrada, nome_produto_final, config_json, urgente, submetida_em) \
+      \  (usuario_email, estado_id, config_json, urgente, sp_numero, sp_ano, submetida_em) \
       \VALUES (?, 1, ?, ?, ?, ?, ?);"
       ( unEmail usuarioEmail
-      , unCaminho caminho
-      , nomeProdutoFinal cfg
       , configJsonTexto
       , urgente
+      , numero sp
+      , ano sp
       , agora
       )
 
@@ -135,8 +136,8 @@ inserirDemandaDB pool usr@Usuario{..} caminho cfg urgente agora = withDB pool $ 
     pure Demanda
       { demandaId          = DemandaId novoId
       , demandaSolicitante = usr
-      , demandaDiretorio   = caminho
       , demandaConfig      = cfg
+      , demandaSP          = sp
       , demandaUrgente     = urgente
       , demandaCriadaEm    = agora
       }
@@ -146,8 +147,8 @@ listarDemandasDB :: DBPool -> IO [DemandaResumo]
 listarDemandasDB pool = withDB pool $ \conn ->
   query_ conn
     "SELECT \
-    \  d.id, u.nome, u.matricula, d.diretorio_entrada, d.nome_produto_final, \
-    \  d.config_json, d.urgente, e.codigo, e.descricao, d.worker_id, d.mensagem_erro, d.submetida_em \
+    \  d.id, u.nome, u.matricula, \
+    \  d.config_json, d.urgente, d.sp_numero, d.sp_ano, e.codigo, e.descricao, d.worker_id, d.mensagem_erro, d.submetida_em \
     \FROM demandas d \
     \JOIN usuarios u ON u.email = d.usuario_email \
     \JOIN estados_processamento e ON e.id = d.estado_id \
@@ -175,21 +176,21 @@ atualizarHeartbeatWorkerDB pool workerId agora = withDB pool $ \conn ->
 buscarProximaDemandaFilaDB :: DBPool -> IO (Maybe Demanda)
 buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
   rows <- query_ conn
-    "SELECT d.id, u.nome, u.matricula, u.email, d.diretorio_entrada, d.config_json, d.urgente, d.submetida_em \
+    "SELECT d.id, u.nome, u.matricula, u.email, d.config_json, d.urgente, d.sp_numero, d.sp_ano, d.submetida_em \
     \FROM demandas d \
     \JOIN usuarios u ON u.email = d.usuario_email \
     \WHERE d.estado_id = 1 \
     \ORDER BY d.urgente DESC, d.id ASC \
     \LIMIT 1;"
   case rows of
-    [(did, unome, umat, uemail, dir, cfgTxt, urg, subEm)] -> do
-      let cfgPadrao = ConfigProcessamento "Teste" False False "default" []
+    [(did, unome, umat, uemail, cfgTxt, urg, spNum, spAno, subEm)] -> do
+      let cfgPadrao = ConfigProcessamento False IPEDDefault
           cfg = fromMaybe cfgPadrao (decodeStrict (encodeUtf8 cfgTxt))
       pure $ Just Demanda
         { demandaId          = DemandaId did
         , demandaSolicitante = Usuario unome (Matricula umat) (Email uemail)
-        , demandaDiretorio   = CaminhoCompartilhado dir
         , demandaConfig      = cfg
+        , demandaSP          = SolicitacaoPericial spNum spAno
         , demandaUrgente     = urg
         , demandaCriadaEm    = subEm
         }
@@ -202,6 +203,13 @@ atribuirDemandaWorkerDB pool did wid agora = withDB pool $ \conn ->
     "UPDATE demandas SET worker_id = ?, estado_id = 2, iniciada_em = ? WHERE id = ?;"
     (wid, agora, did)
 
+-- | Desfaz a atribuição de uma demanda que não chegou ao worker, devolvendo-a
+-- para NA_FILA. Só age se ela ainda estiver em INICIALIZANDO (estado 2).
+devolverDemandaParaFilaDB :: DBPool -> Int64 -> IO ()
+devolverDemandaParaFilaDB pool did = withDB pool $ \conn ->
+  execute conn
+    "UPDATE demandas SET worker_id = NULL, estado_id = 1, iniciada_em = NULL WHERE id = ? AND estado_id = 2;"
+    (Only did)
 -- | Atualiza apenas a etapa atual da demanda no banco
 atualizarEtapaDemandaDB :: DBPool -> Int64 -> EtapaProcessamento -> IO ()
 atualizarEtapaDemandaDB pool did etapa = withDB pool $ \conn ->

@@ -43,13 +43,22 @@ data Usuario = Usuario
 instance ToJSON Usuario
 instance FromJSON Usuario
 
--- | Configurações específicas do processamento (PA + IPED)
+data IPEDProfile = 
+  IPEDDefault
+  | Blind
+  | Fastmode
+  | Forensic
+  | Pedo
+  | Triage
+  deriving stock (Show, Eq, Generic)
+
+instance ToJSON IPEDProfile
+instance FromJSON IPEDProfile
+
+-- | Configurações específicas do processamento (IPED)
 data ConfigProcessamento = ConfigProcessamento
-  { nomeProdutoFinal      :: Text
-  , gerarRelatorioPA      :: Bool
-  , executarIndexacaoIPED :: Bool
-  , perfilIPED            :: Text      -- ex: "default", "fastmode", "forensic"
-  , opcoesExtras          :: [Text]    -- Flags adicionais habilitadas na UI
+  { exportarIPED :: Bool
+  , perfilIPED   :: IPEDProfile
   } deriving stock (Show, Eq, Generic)
 
 instance ToJSON ConfigProcessamento
@@ -77,11 +86,19 @@ data EstadoWorker
 instance ToJSON EstadoWorker
 instance FromJSON EstadoWorker
 
+data SolicitacaoPericial = SolicitacaoPericial
+  { numero :: Int
+  , ano    :: Int
+  } deriving stock (Show, Eq, Generic)
+
+instance ToJSON SolicitacaoPericial
+instance FromJSON SolicitacaoPericial
+
 -- | Demanda enviada ao Worker para execução
 data Demanda = Demanda
   { demandaId          :: DemandaId
   , demandaSolicitante :: Usuario
-  , demandaDiretorio   :: CaminhoCompartilhado
+  , demandaSP          :: SolicitacaoPericial
   , demandaConfig      :: ConfigProcessamento
   , demandaUrgente     :: Bool
   , demandaCriadaEm    :: UTCTime

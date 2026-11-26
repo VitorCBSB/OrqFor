@@ -34,28 +34,24 @@ formularioDemanda =
 
       fieldset_ $ do
         legend_ (strong_ "Diretório e Configurações")
-        campoTexto
-          "Diretório no compartilhamento de rede"
-          "demandaDiretorio"
-          "Ex: 2026/Caso_042/Evidencia_01"
-          True
         div_ [class_ "grid"] $ do
-          campoTexto
-            "Nome do produto final"
-            "nomeProdutoFinal"
-            "Ex: Relatorio_Caso_042"
+          campoTexto "SP Número" "spNum" "Ex.: 3194" True
+          campoTexto "SP Ano" "spAno" "Ex.: 2026" True
+        div_ [class_ "grid"] $ do
+          campoCheckbox
+            "Exportar IPED"
+            "exportarIPED"
             True
           label_ [for_ "perfilIPED"] $ do
             "Perfil IPED"
             select_ [id_ "perfilIPED", name_ "perfilIPED"] $ do
               option_ [value_ "default"] "Default"
+              option_ [value_ "blind"] "Blind"
               option_ [value_ "fastmode"] "Fastmode"
               option_ [value_ "forensic"] "Forensic"
-          label_ $ do
-            input_ [type_ "checkbox", name_ "urgente", value_ "true"]
-            " Demanda Urgente (priorizar na fila de processamento)"
+              option_ [value_ "pedo"] "Pedo"
+              option_ [value_ "triage"] "Triage"
 
-        campoCheckbox "Executar geração de relatório no PA" "gerarRelatorioPA" True
-        campoCheckbox "Executar indexação no IPED" "executarIndexacaoIPED" True
+        campoCheckbox "Demanda Urgente (priorizar na fila de processamento)" "urgente" False
 
       button_ [type_ "submit"] "Enviar para Fila"
