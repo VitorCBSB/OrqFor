@@ -51,24 +51,31 @@ executarScriptTeste varConn varEstado demanda = do
       -- ex: "C:\\Program Files\\AutoHotkey\\v2\\AutoHotkey64.exe"
       executavelAHK = "C:\\Users\\PA\\Desktop\\PA_Auto\\deps\\AutoHotKey\\AutoHotkey64.exe"
 
-  TIO.putStrLn $ "[Execução] Disparando AutoHotkey: " <> T.pack caminhoAHK
+  -- O 'finally' garante a volta a Livre em qualquer saída, inclusive exceções
+  -- assíncronas (ex.: killThread), para o worker nunca ficar preso em Ocupada.
+  (`EX.finally` atomically (writeTVar varEstado Livre)) $ do
+    TIO.putStrLn $ "[Execução] Disparando AutoHotkey: " <> T.pack caminhoAHK
 
-  -- Executa de forma síncrona (aguarda o script terminar)
-  (exitCode, _stdout, stderrStr) <-
-    readCreateProcessWithExitCode (proc executavelAHK [caminhoAHK]) ""
+    -- Executa de forma síncrona (aguarda o script terminar). Exceções ao lançar
+    -- o processo (ex.: executável inexistente) são capturadas e viram falha.
+    resultado <- tentar $
+      readCreateProcessWithExitCode (proc executavelAHK [caminhoAHK]) ""
 
-  case exitCode of
-    ExitSuccess -> do
-      TIO.putStrLn "[Execução] Script AutoHotkey finalizado com sucesso."
-      let saidaTeste = CaminhoCompartilhado "C:\\Users\\PA\\Desktop\\PA_Auto\\saida_teste"
-      enviarSePossivel varConn (DemandaConcluida did saidaTeste)
+    case resultado of
+      Left e -> do
+        let motivo = "Falha ao executar o AutoHotkey: " <> T.pack (show e)
+        TIO.putStrLn $ "[Execução] " <> motivo
+        enviarSePossivel varConn (DemandaFalhou did motivo)
 
-    ExitFailure codigo -> do
-      let motivo = "AutoHotkey retornou erro (código " <> T.pack (show codigo) <> "): " <> T.pack stderrStr
-      TIO.putStrLn $ "[Execução] " <> motivo
-      enviarSePossivel varConn (DemandaFalhou did motivo)
+      Right (ExitSuccess, _stdout, _stderr) -> do
+        TIO.putStrLn "[Execução] Script AutoHotkey finalizado com sucesso."
+        let saidaTeste = CaminhoCompartilhado "C:\\Users\\PA\\Desktop\\PA_Auto\\saida_teste"
+        enviarSePossivel varConn (DemandaConcluida did saidaTeste)
 
-  atomically $ writeTVar varEstado Livre
+      Right (ExitFailure codigo, _stdout, stderrStr) -> do
+        let motivo = "AutoHotkey retornou erro (código " <> T.pack (show codigo) <> "): " <> T.pack stderrStr
+        TIO.putStrLn $ "[Execução] " <> motivo
+        enviarSePossivel varConn (DemandaFalhou did motivo)
 
 
 -- | Uma sessão com o orquestrador: handshake e laço de comandos. Devolve True se o
