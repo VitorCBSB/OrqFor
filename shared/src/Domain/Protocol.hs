@@ -27,6 +27,9 @@ data MsgDoWorker
       , hwEstadoAtual :: EstadoWorker  -- Crucial para recuperação após queda de rede
       }
   | HeartbeatWorker EstadoWorker
+  | DemandaAceita   -- Confirma o recebimento de 'IniciarDemanda'; o worker já está Ocupada
+      { daDemandaId :: DemandaId
+      }
   | AtualizacaoEtapa
       { aeDemandaId :: DemandaId
       , aeNovaEtapa :: EtapaProcessamento

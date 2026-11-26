@@ -6,14 +6,12 @@ import Control.Concurrent (threadDelay, forkIO)
 import Control.Concurrent.STM
 import qualified Control.Exception as EX
 import Control.Monad
-import Control.Monad.IO.Class (liftIO)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map as Map
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import qualified Data.Text.Lazy as TL
 import Data.Time (getCurrentTime)
 import Lucid (renderText)
 import qualified Network.Wai.Handler.Warp as Warp
@@ -68,13 +66,15 @@ wsHandler state pending = do
 loopMensagensWorker :: AppState -> WorkerId -> WS.Connection -> IO ()
 loopMensagensWorker state wid@(WorkerId widTexto) conn =
   forever (do
-    raw <- WS.receiveData conn :: IO BL.ByteString
-    case Aeson.decode raw of
+    rawData <- WS.receiveData conn :: IO BL.ByteString
+    case Aeson.decode rawData of
       Just (HeartbeatWorker estadoAtual) -> do
         agora <- getCurrentTime
         atualizarHeartbeatWorkerDB (stDb state) widTexto agora
-        atomically $ atualizarEstadoWorkerSTM state wid estadoAtual
+        atomically $ aplicarHeartbeatSTM state wid estadoAtual
 
+      Just (DemandaAceita did) ->
+        atomically $ confirmarDemandaSTM state wid did
       Just (AtualizacaoEtapa (DemandaId did) etapa) -> do
         atualizarEtapaDemandaDB (stDb state) did etapa
         TIO.putStrLn $ "[WS] " <> widTexto <> " atualizou demanda " <> T.pack (show did) <> " -> " <> T.pack (show etapa)
@@ -131,7 +131,7 @@ despacharProxima state = do
           [] -> pure Nothing
           ((wid, cw) : _) -> do
             writeTVar (stWorkersAtivos state)
-              (Map.insert wid (cw { cwEstado = Ocupada (demandaId demanda) }) mapa)
+              (Map.insert wid (cw { cwEstado = Ocupada (demandaId demanda), cwConfirmada = False }) mapa)
             pure (Just (wid, cwConn cw))
       case mWorkerLivre of
         Nothing -> pure () -- Nenhum worker livre no momento

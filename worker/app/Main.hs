@@ -26,7 +26,6 @@ executarScriptTeste conn varEstado demanda = do
       -- ex: "C:\\Program Files\\AutoHotkey\\v2\\AutoHotkey64.exe"
       executavelAHK = "C:\\Users\\PA\\Desktop\\PA_Auto\\deps\\AutoHotKey\\AutoHotkey64.exe"
 
-  atomically $ writeTVar varEstado (Ocupada did)
   TIO.putStrLn $ "[Execução] Disparando AutoHotkey: " <> T.pack caminhoAHK
 
   -- Executa de forma síncrona (aguarda o script terminar)
@@ -84,6 +83,11 @@ main = do
           case Aeson.decode cmdRaw of
             Just (IniciarDemanda demanda) -> do
               TIO.putStrLn $ "[CMD] Recebida demanda: " <> T.pack (show (demandaId demanda))
+              -- Marca Ocupada ANTES de criar a thread e confirma o recebimento ao
+              -- orquestrador, para que heartbeats seguintes nunca informem Livre
+              -- com uma demanda em mãos.
+              atomically $ writeTVar varEstado (Ocupada (demandaId demanda))
+              WS.sendTextData conn (Aeson.encode (DemandaAceita (demandaId demanda)))
               -- Roda em thread separada para não bloquear o recebimento de outras mensagens WS
               void $ forkIO $ executarScriptTeste conn varEstado demanda
 
