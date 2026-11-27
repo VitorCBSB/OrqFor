@@ -25,7 +25,7 @@ import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Data.Aeson (decodeStrict, encode)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
@@ -33,8 +33,9 @@ import Data.Time (UTCTime)
 import Database.SQLite.Simple
 import Database.SQLite.Simple.FromField (FromField)
 import Database.SQLite.Simple.FromRow (RowParser)
-import Database.SQLite.Simple.ToField (ToField)
+import Database.SQLite.Simple.ToField (ToField, toField)
 import Domain.Types
+import Filtro (FiltroDemandas (..), Situacao (..))
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
 
@@ -160,18 +161,69 @@ inserirDemandaDB pool usr@Usuario{..} cfg urgente sp agora = withDB pool $ \conn
       , demandaCriadaEm    = agora
       }
 
--- | Lista as demandas mais recentes com os dados do usuário e a descrição do estado
-listarDemandasDB :: DBPool -> IO [DemandaResumo]
-listarDemandasDB pool = withDB pool $ \conn ->
-  query_ conn
-    "SELECT \
-    \  d.id, u.nome, u.matricula, \
-    \  d.config_json, d.urgente, d.sp_numero, d.sp_ano, e.codigo, e.descricao, d.worker_id, d.mensagem_erro, d.submetida_em \
-    \FROM demandas d \
-    \JOIN usuarios u ON u.email = d.usuario_email \
-    \JOIN estados_processamento e ON e.id = d.estado_id \
-    \ORDER BY d.id DESC \
-    \LIMIT 100;"
+-- | Lista as demandas que atendem ao filtro, das mais recentes para as mais
+-- antigas, com os dados do usuário e a descrição do estado. Devolve o total de
+-- demandas encontradas e no máximo 100 delas.
+listarDemandasDB :: DBPool -> FiltroDemandas -> IO (Int, [DemandaResumo])
+listarDemandasDB pool filtro = withDB pool $ \conn -> do
+  let (clausulaWhere, parametros) = clausulaFiltro filtro
+  contagem <- query conn
+    ( "SELECT COUNT(*) \
+      \FROM demandas d \
+      \JOIN usuarios u ON u.email = d.usuario_email"
+      <> clausulaWhere <> ";" )
+    parametros
+  linhas <- query conn
+    ( "SELECT \
+      \  d.id, u.nome, u.matricula, \
+      \  d.config_json, d.urgente, d.sp_numero, d.sp_ano, e.codigo, e.descricao, d.worker_id, d.mensagem_erro, d.submetida_em \
+      \FROM demandas d \
+      \JOIN usuarios u ON u.email = d.usuario_email \
+      \JOIN estados_processamento e ON e.id = d.estado_id"
+      <> clausulaWhere <>
+      " ORDER BY d.id DESC \
+      \LIMIT 100;" )
+    parametros
+  let total = case contagem of
+        [Only n] -> n
+        _        -> length linhas
+  pure (total, linhas)
+
+-- | Monta o WHERE do filtro e os parâmetros correspondentes. Os valores digitados
+-- pelo usuário entram sempre como parâmetros (?), nunca no texto do SQL.
+clausulaFiltro :: FiltroDemandas -> (Query, [SQLData])
+clausulaFiltro (FiltroDemandas busca situacao somenteUrgentes)
+  | null condicoes = ("", [])
+  | otherwise =
+      ( Query (" WHERE " <> T.intercalate " AND " (map (fromQuery . fst) condicoes))
+      , concatMap snd condicoes )
+  where
+    condicoes = catMaybes [condBusca, condSituacao, condUrgente]
+
+    -- Nome, matrícula ou "numero/ano" da SP contendo o texto. '%' e '_' digitados
+    -- são escapados para valerem como caracteres comuns no LIKE.
+    condBusca
+      | T.null busca = Nothing
+      | otherwise =
+          let padrao = toField ("%" <> escaparLike busca <> "%")
+          in Just ( "(u.nome LIKE ? ESCAPE '\\' \
+                    \OR u.matricula LIKE ? ESCAPE '\\' \
+                    \OR (d.sp_numero || '/' || d.sp_ano) LIKE ? ESCAPE '\\')"
+                  , [padrao, padrao, padrao] )
+
+    condSituacao = case situacao of
+      Todas       -> Nothing
+      EmAndamento -> Just ("d.estado_id IN (1, 2, 3, 4)", [])
+      Enfileiradas -> Just ("d.estado_id = 1", [])
+      Concluidas  -> Just ("d.estado_id = 5", [])
+      ComErro     -> Just ("d.estado_id = 6", [])
+
+    condUrgente
+      | somenteUrgentes = Just ("d.urgente = 1", [])
+      | otherwise       = Nothing
+
+    escaparLike = T.concatMap $ \c ->
+      if c `elem` ("\\%_" :: String) then T.pack ['\\', c] else T.singleton c
 
 -- | Verifica se o worker existe na tabela 'workers' e está com ativa = 1
 validarWorkerDB :: DBPool -> WorkerId -> IO Bool

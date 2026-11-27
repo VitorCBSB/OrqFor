@@ -5,6 +5,7 @@ module Web.Views.Demandas
   , fragmentoListaDemandas
   ) where
 
+import Control.Monad (forM_)
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, minutesToTimeZone, utcToLocalTime)
 import Data.Text (Text, pack)
 import Lucid
@@ -13,25 +14,65 @@ import Web.Views.Layout
 
 import Database
 import Domain.Types (Matricula (..), WorkerId (..))
+import Filtro
 import Log (exibirDemanda)
 
-paginaDemandas :: [DemandaResumo] -> Html ()
-paginaDemandas demandas = layoutBase "Orquestrador PA / IPED" $ do
+paginaDemandas :: FiltroDemandas -> (Int, [DemandaResumo]) -> Html ()
+paginaDemandas filtro resultado = layoutBase "Orquestrador PA / IPED" $ do
   div_ [style_ "display: flex; justify-content: space-between; align-items: center;"] $ do
     h1_ "Fila de Execução"
     a_ [href_ "/nova-demanda", role_ "button"] "+ Nova Demanda"
 
-  -- Atualiza a lista a cada 5 s buscando apenas o fragmento (htmx)
+  barraFiltros filtro
+
+  -- Atualiza a lista a cada 5 s buscando apenas o fragmento (htmx), sempre com
+  -- os valores atuais da barra de filtros
   div_ [ id_ "container-fila"
        , makeAttribute "hx-get" "/fragmento-demandas"
        , makeAttribute "hx-trigger" "every 5s"
+       , makeAttribute "hx-include" "#filtros"
        , makeAttribute "hx-swap" "innerHTML"
        ] $
-    fragmentoListaDemandas demandas
+    fragmentoListaDemandas filtro resultado
 
-fragmentoListaDemandas :: [DemandaResumo] -> Html ()
-fragmentoListaDemandas [] = p_ "Nenhuma demanda registrada no banco de dados."
-fragmentoListaDemandas demandas =
+-- | Barra de filtros. Com htmx, a lista é atualizada enquanto o usuário digita
+-- (após 300 ms sem digitar) ou muda a seleção; sem htmx, o formulário funciona
+-- como um GET comum para "/".
+barraFiltros :: FiltroDemandas -> Html ()
+barraFiltros (FiltroDemandas busca situacao somenteUrgentes) =
+  form_ [ id_ "filtros"
+        , action_ "/"
+        , method_ "get"
+        , makeAttribute "hx-get" "/fragmento-demandas"
+        , makeAttribute "hx-target" "#container-fila"
+        , makeAttribute "hx-swap" "innerHTML"
+        , makeAttribute "hx-trigger" "input changed delay:300ms from:#busca, change, submit"
+        ] $
+    div_ [class_ "grid", style_ "align-items: center;"] $ do
+      input_ [ type_ "search"
+             , id_ "busca"
+             , name_ "busca"
+             , value_ busca
+             , placeholder_ "Buscar por nome, matrícula ou SP (ex.: 3194/2026)"
+             , makeAttribute "aria-label" "Buscar"
+             ]
+      select_ [name_ "situacao", makeAttribute "aria-label" "Situação"] $
+        forM_ [minBound .. maxBound] $ \s ->
+          option_ ([value_ (codigoSituacao s)] <> [selected_ "" | s == situacao])
+            (toHtml (rotuloSituacao s))
+      label_ $ do
+        campoCheckbox " Somente urgentes" "urgentes" False
+
+fragmentoListaDemandas :: FiltroDemandas -> (Int, [DemandaResumo]) -> Html ()
+fragmentoListaDemandas filtro (_, [])
+  | filtro == filtroVazio = p_ "Nenhuma demanda registrada no banco de dados."
+  | otherwise             = p_ "Nenhuma demanda encontrada com esses filtros."
+fragmentoListaDemandas _ (total, demandas) = do
+  p_ [style_ "margin-bottom: 0.5rem;"] $ small_ $ do
+    toHtml (contagem total)
+    if total > length demandas
+      then toHtml (" (exibindo as " <> pack (show (length demandas)) <> " mais recentes)")
+      else pure ()
   table_ $ do
     thead_ $
       tr_ $ do
@@ -44,6 +85,10 @@ fragmentoListaDemandas demandas =
     tbody_ $
       mapM_ renderLinha demandas
   where
+    contagem :: Int -> Text
+    contagem 1 = "1 demanda encontrada"
+    contagem n = pack (show n) <> " demandas encontradas"
+
     renderLinha :: DemandaResumo -> Html ()
     renderLinha d = tr_ $ do
       td_ $ do
