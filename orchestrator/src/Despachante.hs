@@ -6,11 +6,10 @@ module Despachante
   ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.STM (atomically, readTVar, writeTVar)
+import Control.Concurrent.STM (atomically)
 import qualified Control.Exception as EX
 import Control.Monad (forever)
 import qualified Data.Aeson as Aeson
-import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import qualified Network.WebSockets as WS
@@ -57,14 +56,7 @@ despacharProxima state = do
     Just (ProximaDemanda demanda) -> do
       let did = demandaId demanda
       -- Reserva o worker no STM para evitar envio duplo
-      mWorkerLivre <- atomically $ do
-        mapa <- readTVar (stWorkersAtivos state)
-        case filter (\(_, cw) -> cwEstado cw == Livre) (Map.toList mapa) of
-          [] -> pure Nothing
-          ((wid, cw) : _) -> do
-            writeTVar (stWorkersAtivos state)
-              (Map.insert wid (cw { cwEstado = Ocupada did, cwConfirmada = False }) mapa)
-            pure (Just (wid, cwConn cw))
+      mWorkerLivre <- atomically $ reservarWorkerLivreSTM state did
       case mWorkerLivre of
         Nothing -> pure () -- Nenhum worker livre no momento
         Just (wid@(WorkerId widTexto), conn) -> do
@@ -74,7 +66,7 @@ despacharProxima state = do
           atribuido <- tentar (atribuirDemandaWorkerDB (stDb state) did wid agora)
           case atribuido of
             Left e -> do
-              atomically $ atualizarEstadoWorkerSTM state wid Livre
+              atomically $ cancelarDespachoSTM state wid
               EX.throwIO e
             Right () -> pure ()
           registrar "Despachante" $ "Enviando demanda " <> exibirDemanda did <> " para " <> widTexto

@@ -16,7 +16,8 @@ module Database
   , buscarProximaDemandaFilaDB
   , atribuirDemandaWorkerDB
   , devolverDemandaParaFilaDB
-  , listarDemandasEmAndamentoDB
+  , DemandaEmExecucao (..)
+  , listarDemandasEmExecucaoDB
   , marcarDemandaOrfaDB
   , atualizarEtapaDemandaDB
   , concluirDemandaDB
@@ -255,8 +256,12 @@ clausulaFiltro (FiltroDemandas busca situacao somenteUrgentes)
       | somenteUrgentes = Just ("d.urgente = 1", [])
       | otherwise       = Nothing
 
-    escaparLike = T.concatMap $ \c ->
-      if c `elem` ("\\%_" :: String) then T.pack ['\\', c] else T.singleton c
+-- | Escapa '\', '%' e '_' para que valham como caracteres comuns num LIKE com
+-- @ESCAPE '\'@.
+escaparLike :: Text -> Text
+escaparLike = T.concatMap $ \c ->
+  if c `elem` ("\\%_" :: String) then T.pack ['\\', c] else T.singleton c
+
 
 -- | Verifica se o worker existe na tabela 'workers' e está com ativa = 1
 validarWorkerDB :: DBPool -> WorkerId -> IO Bool
@@ -322,10 +327,19 @@ devolverDemandaParaFilaDB pool did = withDB pool $ \conn ->
     "UPDATE demandas SET worker_id = NULL, estado_id = ?, iniciada_em = NULL WHERE id = ? AND estado_id = ?;"
     (EstadoNaFila, did, EstadoInicializando)
 
--- | Demandas em execução ('estadosEmExecucao') com o worker atribuído e o último
--- heartbeat desse worker: (id da demanda, id do worker, último heartbeat).
-listarDemandasEmAndamentoDB :: DBPool -> IO [(DemandaId, WorkerId, Maybe UTCTime)]
-listarDemandasEmAndamentoDB pool = withDB pool $ \conn -> do
+-- | Demanda em execução com o worker atribuído e o último heartbeat desse worker.
+data DemandaEmExecucao = DemandaEmExecucao
+  { deDemanda         :: DemandaId
+  , deWorker          :: WorkerId
+  , deUltimoHeartbeat :: Maybe UTCTime
+  } deriving (Show, Eq)
+
+instance FromRow DemandaEmExecucao where
+  fromRow = DemandaEmExecucao <$> field <*> field <*> field
+
+-- | Demandas em execução ('estadosEmExecucao').
+listarDemandasEmExecucaoDB :: DBPool -> IO [DemandaEmExecucao]
+listarDemandasEmExecucaoDB pool = withDB pool $ \conn -> do
   let (condicao, parametros) = estadoEm "d.estado_id" estadosEmExecucao
   query conn
     ( "SELECT d.id, d.worker_id, w.ultimo_heartbeat \

@@ -4,21 +4,34 @@ version:       0.1.0.0
 author:        Vitor Coimbra
 build-type:    Simple
 
-executable orchestrator
-    main-is: Main.hs
-    hs-source-dirs: app, src
+common comum
     default-language: GHC2024
-    build-depends: base >= 4 && < 5, shared, aeson, scotty >= 0.20, lucid, text, stm, time, sqlite-simple, directory, filepath, bytestring, containers, websockets, warp, wai-websockets, http-types
-    other-modules: 
+    ghc-options: -Wall
+
+-- Toda a lógica do orquestrador. Fica separada do executável para poder ser
+-- usada por outros componentes (ex.: uma suíte de testes) sem duplicar código.
+library
+    import: comum
+    hs-source-dirs: src
+    build-depends: base >= 4 && < 5, shared, aeson, scotty >= 0.20, lucid, text, stm, time, sqlite-simple, directory, filepath, bytestring, containers, websockets, http-types
+    exposed-modules:
         AppState
         Database
         Despachante
         EstadoDemanda
         Filtro
         Reconciliacao
+        SituacaoWorker
         Ws
         Web.Rotas
         Web.Views.Layout
         Web.Views.Demandas
         Web.Views.NovaDemanda
-    ghc-options: -Wall -threaded
+
+-- Só a inicialização: banco, threads e servidor HTTP/WebSocket.
+executable orchestrator
+    import: comum
+    main-is: Main.hs
+    hs-source-dirs: app
+    build-depends: base >= 4 && < 5, Orchestrator, shared, text, filepath, scotty >= 0.20, websockets, warp, wai-websockets
+    ghc-options: -threaded

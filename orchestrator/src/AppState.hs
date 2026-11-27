@@ -1,37 +1,36 @@
-{-# LANGUAGE RecordWildCards #-}
-
+-- | Estado compartilhado do orquestrador: o banco e os workers conectados.
+-- As regras de transição da situação de cada worker ficam em "SituacaoWorker";
+-- aqui elas são aplicadas sobre o mapa de workers, em STM.
 module AppState
   ( AppState (..)
   , ConexaoWorker (..)
   , novoAppState
-  , atualizarEstadoWorkerSTM
+  , registrarWorkerSTM
+  , removerWorkerSTM
+  , reservarWorkerLivreSTM
+  , cancelarDespachoSTM
   , aplicarHeartbeatSTM
   , confirmarDemandaSTM
   , liberarWorkerSTM
-  , registrarWorkerSTM
-  , removerWorkerSTM
   , listarWorkersConectadosSTM
   ) where
 
 import Control.Concurrent.STM
-import Data.Unique (Unique)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Unique (Unique)
 import qualified Network.WebSockets as WS
 
 import Database (DBPool)
-import Domain.Types (DemandaId, EstadoWorker (..), WorkerId)
+import Domain.Types (DemandaId, EstadoWorker, WorkerId)
+import SituacaoWorker
 
 data ConexaoWorker = ConexaoWorker
   { cwConn :: WS.Connection
-  , cwEstado :: EstadoWorker
   , cwToken :: Unique
     -- ^ Identifica esta conexão específica. Permite que o handler de uma conexão
     -- antiga não remova do mapa o registro de uma conexão mais nova do mesmo worker.
-  , cwConfirmada :: Bool
-    -- ^ False entre o despacho de uma demanda e o 'DemandaAceita' do worker.
-    -- Enquanto for False, heartbeats com estado Livre são antigos (enviados
-    -- antes de o worker receber a demanda) e devem ser ignorados.
+  , cwSituacao :: SituacaoWorker
   }
 
 data AppState = AppState
@@ -49,7 +48,7 @@ novoAppState pool = do
 registrarWorkerSTM :: AppState -> WorkerId -> WS.Connection -> EstadoWorker -> Unique -> STM (Maybe WS.Connection)
 registrarWorkerSTM st wid conn estado token = do
   mapa <- readTVar (stWorkersAtivos st)
-  writeTVar (stWorkersAtivos st) (Map.insert wid (ConexaoWorker conn estado token True) mapa)
+  writeTVar (stWorkersAtivos st) (Map.insert wid (ConexaoWorker conn token (situacaoInicial estado)) mapa)
   pure (cwConn <$> Map.lookup wid mapa)
 
 -- | Remove o worker do mapa somente se o registro ainda pertencer à conexão
@@ -59,43 +58,37 @@ removerWorkerSTM st wid token =
   modifyTVar' (stWorkersAtivos st) $
     Map.update (\cw -> if cwToken cw == token then Nothing else Just cw) wid
 
--- | Define o estado do worker de forma incondicional (o estado é tratado como confirmado).
-atualizarEstadoWorkerSTM :: AppState -> WorkerId -> EstadoWorker -> STM ()
-atualizarEstadoWorkerSTM st wid novoEstado =
-  modifyTVar' (stWorkersAtivos st) $
-    Map.adjust (\cw -> cw { cwEstado = novoEstado, cwConfirmada = True }) wid
+-- | Escolhe um worker livre (o de menor id), reserva-o para a demanda e devolve
+-- a conexão dele. A escolha e a reserva acontecem na mesma transação, para que
+-- o mesmo worker não receba duas demandas.
+reservarWorkerLivreSTM :: AppState -> DemandaId -> STM (Maybe (WorkerId, WS.Connection))
+reservarWorkerLivreSTM st did = do
+  mapa <- readTVar (stWorkersAtivos st)
+  case Map.lookupMin (Map.filter (estaLivre . cwSituacao) mapa) of
+    Nothing -> pure Nothing
+    Just (wid, cw) -> do
+      writeTVar (stWorkersAtivos st)
+        (Map.insert wid cw { cwSituacao = aoDespachar did (cwSituacao cw) } mapa)
+      pure (Just (wid, cwConn cw))
 
--- | Aplica o estado informado em um heartbeat. Se uma demanda foi despachada e
--- ainda não confirmada, um heartbeat Livre é anterior ao recebimento dela
--- pelo worker e é descartado, para não liberar o worker indevidamente.
+cancelarDespachoSTM :: AppState -> WorkerId -> STM ()
+cancelarDespachoSTM st wid = ajustarSituacao st wid aoCancelarDespacho
+
 aplicarHeartbeatSTM :: AppState -> WorkerId -> EstadoWorker -> STM ()
-aplicarHeartbeatSTM st wid estadoInformado =
-  modifyTVar' (stWorkersAtivos st) $ Map.adjust aplicar wid
-  where
-    aplicar cw
-      | not (cwConfirmada cw), estadoInformado == Livre = cw
-      | otherwise = cw { cwEstado = estadoInformado, cwConfirmada = True }
+aplicarHeartbeatSTM st wid estado = ajustarSituacao st wid (aoReceberHeartbeat estado)
 
--- | Marca o worker como Livre ao receber o resultado final de uma demanda, mas
--- somente se ele estiver ocupado com essa mesma demanda. Um resultado reenviado
--- após reconexão pode chegar quando o worker já está executando outra demanda.
-liberarWorkerSTM :: AppState -> WorkerId -> DemandaId -> STM ()
-liberarWorkerSTM st wid did =
-  modifyTVar' (stWorkersAtivos st) $ Map.adjust liberar wid
-  where
-    liberar cw
-      | cwEstado cw == Ocupada did = cw { cwEstado = Livre, cwConfirmada = True }
-      | otherwise = cw
-
--- | Registra que o worker confirmou o recebimento da demanda despachada.
 confirmarDemandaSTM :: AppState -> WorkerId -> DemandaId -> STM ()
-confirmarDemandaSTM st wid did =
-  modifyTVar' (stWorkersAtivos st) $ Map.adjust confirmar wid
-  where
-    confirmar cw
-      | cwEstado cw == Ocupada did = cw { cwConfirmada = True }
-      | otherwise = cw
+confirmarDemandaSTM st wid did = ajustarSituacao st wid (aoConfirmarDemanda did)
+
+liberarWorkerSTM :: AppState -> WorkerId -> DemandaId -> STM ()
+liberarWorkerSTM st wid did = ajustarSituacao st wid (aoReceberResultado did)
 
 listarWorkersConectadosSTM :: AppState -> STM [WorkerId]
-listarWorkersConectadosSTM st = 
+listarWorkersConectadosSTM st =
   Map.keys <$> readTVar (stWorkersAtivos st)
+
+-- | Aplica uma transição à situação de um worker, se ele estiver conectado.
+ajustarSituacao :: AppState -> WorkerId -> (SituacaoWorker -> SituacaoWorker) -> STM ()
+ajustarSituacao st wid f =
+  modifyTVar' (stWorkersAtivos st) $
+    Map.adjust (\cw -> cw { cwSituacao = f (cwSituacao cw) }) wid
