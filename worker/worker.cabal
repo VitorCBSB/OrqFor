@@ -15,7 +15,7 @@ executable worker
         Sessao
         SessaoGrafica
     default-language: GHC2024
-    build-depends: base >= 4 && < 5, aeson, shared, websockets, bytestring, text, stm, process, directory, filepath
+    build-depends: base >= 4 && < 5, aeson, shared, websockets, bytestring, text, stm, process, directory, filepath, time
     ghc-options: -Wall -threaded
     -- APIs do Windows usadas pela verificação da sessão gráfica (módulo SessaoGrafica)
     if os(windows)

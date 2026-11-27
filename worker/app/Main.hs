@@ -42,8 +42,9 @@ main = do
   registrar "Configuração" $ "Lida de " <> T.pack caminhoConfig
 
   let dirPendentes = dirExecutavel </> "resultados-pendentes"
-  createDirectoryIfMissing True dirPendentes
-  amb <- novoAmbiente cfg dirPendentes
+      dirLogs = dirExecutavel </> "logs-execucao"
+  mapM_ (createDirectoryIfMissing True) [dirPendentes, dirLogs]
+  amb <- novoAmbiente cfg dirPendentes dirLogs
   -- Registra já na inicialização se a sessão permite automação, para facilitar
   -- o diagnóstico de uma instalação mesmo sem o orquestrador no ar.
   _ <- atualizarSituacaoSessao amb

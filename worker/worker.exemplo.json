@@ -1,6 +1,6 @@
 {
   "orquestrador": "10.0.0.5",
   "workerId": "WIN-WORKER-01",
-  "autoHotkey": "C:\\Users\\PA\\Desktop\\PA_Auto\\deps\\AutoHotKey\\AutoHotkey64.exe",
-  "scriptAutoHotkey": "C:\\Users\\PA\\Desktop\\PA_Auto\\test.ahk"
+  "executavel": "C:\\Users\\PA\\Desktop\\PA_Auto\\run_ahk.bat",
+  "argumentos": []
 }

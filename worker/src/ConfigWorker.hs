@@ -10,7 +10,6 @@ module ConfigWorker
   , carregarConfig
   ) where
 
-import Control.Monad (filterM)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (toLower)
@@ -27,18 +26,19 @@ import Util (tentar)
 -- > {
 -- >   "orquestrador": "10.0.0.5",
 -- >   "workerId": "WIN-WORKER-01",
--- >   "autoHotkey": "C:\\PA_Auto\\deps\\AutoHotKey\\AutoHotkey64.exe",
--- >   "scriptAutoHotkey": "C:\\PA_Auto\\test.ahk"
+-- >   "executavel": "C:\\Users\\PA\\Desktop\\PA_Auto\\run_ahk.bat",
+-- >   "argumentos": []
 -- > }
 data ConfigWorker = ConfigWorker
-  { cfgOrquestrador     :: String
+  { cfgOrquestrador :: String
     -- ^ Endereço (IP ou nome) da máquina do orquestrador
-  , cfgWorkerId         :: WorkerId
+  , cfgWorkerId     :: WorkerId
     -- ^ Precisa estar cadastrado e ativo na tabela workers do orquestrador
-  , cfgAutoHotkey       :: FilePath
-    -- ^ Executável do AutoHotkey
-  , cfgScriptAutoHotkey :: FilePath
-    -- ^ Script executado para cada demanda
+  , cfgExecutavel   :: FilePath
+    -- ^ Programa executado para cada demanda (ex.: um .bat que chama o
+    -- AutoHotkey, ou o próprio AutoHotkey64.exe). Roda na pasta em que está.
+  , cfgArgumentos   :: [String]
+    -- ^ Argumentos passados ao programa (ex.: o caminho de um script .ahk)
   } deriving (Show, Generic)
 
 -- | Os campos do JSON são os nomes do record sem o prefixo "cfg"
@@ -56,8 +56,8 @@ instance Aeson.FromJSON ConfigWorker where
 -- | Lê e valida o arquivo de configuração. Em caso de problema, devolve uma
 -- mensagem que explica o que corrigir.
 --
--- Os arquivos do AutoHotkey precisam existir: sem eles o worker aceitaria cada
--- demanda e falharia na hora, esvaziando a fila para ERRO.
+-- O executável precisa existir: sem ele o worker aceitaria cada demanda e
+-- falharia na hora, esvaziando a fila para ERRO.
 carregarConfig :: FilePath -> IO (Either Text ConfigWorker)
 carregarConfig caminho = do
   conteudo <- tentar (BL.readFile caminho)
@@ -75,15 +75,13 @@ carregarConfig caminho = do
       | otherwise = bytes
 
     validar cfg = do
-      ausentes <- filterM (fmap not . doesFileExist . snd)
-        [ ("autoHotkey", cfgAutoHotkey cfg)
-        , ("scriptAutoHotkey", cfgScriptAutoHotkey cfg) ]
+      executavelExiste <- doesFileExist (cfgExecutavel cfg)
       let vazios = [ campo | (campo, valor) <- [ ("orquestrador", T.pack (cfgOrquestrador cfg))
                                                 , ("workerId", unWorkerId (cfgWorkerId cfg)) ]
                            , T.null (T.strip valor) ]
           problemas = [ "o campo \"" <> campo <> "\" está vazio" | campo <- vazios ]
-                   <> [ "o arquivo do campo \"" <> campo <> "\" não existe: " <> T.pack valor
-                      | (campo, valor) <- ausentes ]
+                   <> [ "o arquivo do campo \"executavel\" não existe: " <> T.pack (cfgExecutavel cfg)
+                      | not executavelExiste ]
       pure $ if null problemas
         then Right cfg
         else Left $ "Configuração em " <> T.pack caminho <> ": " <> T.intercalate "; " problemas <> "."

@@ -20,7 +20,7 @@ import ConfigWorker (ConfigWorker (..))
 import Configuracao (caminhoWebSocket, intervaloHeartbeatSegundos, portaOrquestrador)
 import Domain.Protocol
 import Domain.Types
-import Execucao (executarScriptTeste)
+import Execucao (executarDemanda)
 import Log (exibirDemanda, registrar)
 import Pendentes (listarPendentes, removerPendente)
 import SessaoGrafica (SituacaoSessao (..))
@@ -113,7 +113,7 @@ sessao amb conn = do
               -- A execução começa antes da confirmação: se o envio falhar (conexão
               -- caindo), a demanda continua sendo executada e o resultado é
               -- reenviado depois (ver módulo "Pendentes").
-              void $ forkIO $ executarScriptTeste amb demanda
+              void $ forkIO $ executarDemanda amb demanda
               WS.sendTextData c (Aeson.encode (DemandaAceita did))
             SessaoInutilizavel motivo -> do
               registrar "Comando" $ "Demanda " <> exibirDemanda did <> " recusada: " <> motivo

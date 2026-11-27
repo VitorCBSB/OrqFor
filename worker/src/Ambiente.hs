@@ -29,6 +29,8 @@ data Ambiente = Ambiente
   { ambConfig :: ConfigWorker
   , ambDirPendentes :: FilePath
     -- ^ Pasta dos resultados ainda não confirmados pelo orquestrador.
+  , ambDirLogs :: FilePath
+    -- ^ Pasta dos logs de execução (saída do programa de cada demanda).
   , ambEstado :: TVar EstadoWorker
     -- ^ Livre ou Ocupada (o que o worker está fazendo). A disponibilidade da
     -- sessão gráfica é verificada à parte, ver 'estadoParaInformar'.
@@ -41,9 +43,9 @@ data Ambiente = Ambiente
   }
 
 -- | Ambiente inicial: worker Livre e sem conexão.
-novoAmbiente :: ConfigWorker -> FilePath -> IO Ambiente
-novoAmbiente cfg dir =
-  Ambiente cfg dir <$> newTVarIO Livre <*> newTVarIO Nothing <*> newMVar () <*> newIORef Nothing
+novoAmbiente :: ConfigWorker -> FilePath -> FilePath -> IO Ambiente
+novoAmbiente cfg dirPendentes dirLogs =
+  Ambiente cfg dirPendentes dirLogs <$> newTVarIO Livre <*> newTVarIO Nothing <*> newMVar () <*> newIORef Nothing
 
 ambWorkerId :: Ambiente -> WorkerId
 ambWorkerId = cfgWorkerId . ambConfig
