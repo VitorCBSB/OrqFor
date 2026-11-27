@@ -59,7 +59,7 @@ aceitarWorker state pending = do
     rawMsg <- WS.receiveData conn :: IO BL.ByteString
     case Aeson.eitherDecode rawMsg of
       Right (HandshakeWorker wid@(WorkerId widTexto) estadoInicial pendentes) -> do
-        conhecido <- validarWorkerDB (stDb state) widTexto
+        conhecido <- validarWorkerDB (stDb state) wid
         if not conhecido
           then do
             registrar "WS" $ "Conexão recusada para worker desconhecido/inativo: " <> widTexto
@@ -67,11 +67,11 @@ aceitarWorker state pending = do
             WS.sendClose conn ("Recusado" :: T.Text)
           else do
             agora <- getCurrentTime
-            atualizarHeartbeatWorkerDB (stDb state) widTexto agora
+            atualizarHeartbeatWorkerDB (stDb state) wid agora
             -- Precisa ocorrer ANTES de registrar o worker no STM: depois do registro
             -- o despachante pode atribuir uma demanda nova a ele, que seria
             -- confundida com uma órfã.
-            reconciliarNoHandshake state widTexto estadoInicial pendentes
+            reconciliarNoHandshake state wid estadoInicial pendentes
             token <- newUnique
             anterior <- atomically $ registrarWorkerSTM state wid conn estadoInicial token
             -- Reconexão do mesmo worker: encerra a conexão antiga para que o handler
@@ -133,28 +133,28 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
           registrar "WS" $ widTexto <> " enviou um handshake repetido; ignorado."
         Right (HeartbeatWorker estadoAtual) -> do
           agora <- getCurrentTime
-          atualizarHeartbeatWorkerDB (stDb state) widTexto agora
+          atualizarHeartbeatWorkerDB (stDb state) wid agora
           atomically $ aplicarHeartbeatSTM state wid estadoAtual
 
         Right (DemandaAceita did) ->
           atomically $ confirmarDemandaSTM state wid did
-        Right (AtualizacaoEtapa (DemandaId did) etapa) -> do
+        Right (AtualizacaoEtapa did etapa) -> do
           atualizarEtapaDemandaDB (stDb state) did etapa
-          registrar "WS" $ widTexto <> " atualizou demanda " <> exibirDemanda (DemandaId did) <> " -> " <> T.pack (show etapa)
+          registrar "WS" $ widTexto <> " atualizou demanda " <> exibirDemanda did <> " -> " <> T.pack (show etapa)
 
-        Right (DemandaConcluida (DemandaId did) (CaminhoCompartilhado saida)) -> do
+        Right (DemandaConcluida did saida) -> do
           agora <- getCurrentTime
           finalizarDemandaDB (stDb state) did Finalizado (Just saida) Nothing agora
-          atomically $ liberarWorkerSTM state wid (DemandaId did)
-          registrar "WS" $ widTexto <> " concluiu demanda " <> exibirDemanda (DemandaId did) <> " em " <> T.pack (show saida)
-          confirmarResultado (DemandaId did)
+          atomically $ liberarWorkerSTM state wid did
+          registrar "WS" $ widTexto <> " concluiu demanda " <> exibirDemanda did <> " em " <> unCaminho saida
+          confirmarResultado did
 
-        Right (DemandaFalhou (DemandaId did) motivo) -> do
+        Right (DemandaFalhou did motivo) -> do
           agora <- getCurrentTime
           finalizarDemandaDB (stDb state) did (Erro motivo) Nothing (Just motivo) agora
-          atomically $ liberarWorkerSTM state wid (DemandaId did)
-          registrar "WS" $ widTexto <> " falhou na demanda " <> exibirDemanda (DemandaId did) <> ": " <> motivo
-          confirmarResultado (DemandaId did)
+          atomically $ liberarWorkerSTM state wid did
+          registrar "WS" $ widTexto <> " falhou na demanda " <> exibirDemanda did <> ": " <> motivo
+          confirmarResultado did
 
     -- Avisa o worker que o resultado foi gravado, para ele descartar a cópia
     -- local. Só é chamado depois da gravação no banco: se ela falhar, a exceção

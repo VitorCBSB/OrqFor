@@ -40,7 +40,7 @@ despacharProxima state = do
   case mDemanda of
     Nothing -> pure ()
     Just demanda -> do
-      let DemandaId did = demandaId demanda
+      let did = demandaId demanda
       -- Reserva o worker no STM para evitar envio duplo
       mWorkerLivre <- atomically $ do
         mapa <- readTVar (stWorkersAtivos state)
@@ -48,7 +48,7 @@ despacharProxima state = do
           [] -> pure Nothing
           ((wid, cw) : _) -> do
             writeTVar (stWorkersAtivos state)
-              (Map.insert wid (cw { cwEstado = Ocupada (demandaId demanda), cwConfirmada = False }) mapa)
+              (Map.insert wid (cw { cwEstado = Ocupada did, cwConfirmada = False }) mapa)
             pure (Just (wid, cwConn cw))
       case mWorkerLivre of
         Nothing -> pure () -- Nenhum worker livre no momento
@@ -56,20 +56,20 @@ despacharProxima state = do
           agora <- getCurrentTime
           -- Passo 1: atribuição no banco. Se falhar, nada foi enviado e o worker
           -- continua utilizável: libera a reserva e propaga o erro.
-          atribuido <- tentar (atribuirDemandaWorkerDB (stDb state) did widTexto agora)
+          atribuido <- tentar (atribuirDemandaWorkerDB (stDb state) did wid agora)
           case atribuido of
             Left e -> do
               atomically $ atualizarEstadoWorkerSTM state wid Livre
               EX.throwIO e
             Right () -> pure ()
-          registrar "Despachante" $ "Enviando demanda " <> exibirDemanda (demandaId demanda) <> " para " <> widTexto
+          registrar "Despachante" $ "Enviando demanda " <> exibirDemanda did <> " para " <> widTexto
           -- Passo 2: envio. Se falhar, a conexão provavelmente caiu; devolve a
           -- demanda para a fila. O worker permanece reservado até o handler da
           -- conexão removê-lo do mapa (ou até o próximo heartbeat dele).
           enviado <- tentar (WS.sendTextData conn (Aeson.encode (IniciarDemanda demanda)))
           case enviado of
             Left e -> do
-              registrar "Despachante" $ "Falha ao enviar demanda " <> exibirDemanda (demandaId demanda)
+              registrar "Despachante" $ "Falha ao enviar demanda " <> exibirDemanda did
                 <> " para " <> widTexto <> "; devolvendo à fila: " <> T.pack (show e)
               devolverDemandaParaFilaDB (stDb state) did
             Right () -> pure ()

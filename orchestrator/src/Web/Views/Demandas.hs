@@ -5,7 +5,6 @@ module Web.Views.Demandas
   , fragmentoListaDemandas
   ) where
 
-import Data.Maybe (fromMaybe)
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, minutesToTimeZone, utcToLocalTime)
 import Data.Text (Text, pack)
 import Lucid
@@ -13,6 +12,8 @@ import Lucid.Base (makeAttribute)
 import Web.Views.Layout
 
 import Database
+import Domain.Types (Matricula (..), WorkerId (..))
+import Log (exibirDemanda)
 
 paginaDemandas :: [DemandaResumo] -> Html ()
 paginaDemandas demandas = layoutBase "Orquestrador PA / IPED" $ do
@@ -46,14 +47,14 @@ fragmentoListaDemandas demandas =
     renderLinha :: DemandaResumo -> Html ()
     renderLinha d = tr_ $ do
       td_ $ do
-        strong_ ("#" <> toHtml (show (drId d)))
+        strong_ (toHtml (exibirDemanda (drId d)))
         if drUrgente d
           then span_ [style_ "margin-left: 0.5rem; color: #c62828; font-weight: bold"] "[URGENTE]"
           else pure ()
-      td_ $ toHtml (drUsuarioNome d <> " (" <> drMatricula d <> ")")
+      td_ $ toHtml (drUsuarioNome d <> " (" <> unMatricula (drMatricula d) <> ")")
       td_ $ toHtml ((pack $ show $ drSPNum d) <> "/" <> (pack $ show $ drSPAno d))
       td_ $ toHtml (drEstadoDesc d)
-      td_ $ toHtml (fromMaybe "-" (drWorkerId d))
+      td_ $ toHtml (maybe "-" unWorkerId (drWorkerId d))
       td_ $ toHtml (formatarHoraBrasilia $ drSubmetidaEm d)
 
 formatarHoraBrasilia :: UTCTime -> Text

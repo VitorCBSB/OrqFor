@@ -28,20 +28,19 @@ prazoDemandaOrfa = 5 * 60
 -- | Compara as demandas que o banco diz estarem em andamento no worker com o que
 -- ele informou no handshake. As que ele não está executando e para as quais não
 -- tem resultado pendente de reenvio foram perdidas e vão para ERRO.
-reconciliarNoHandshake :: AppState -> T.Text -> EstadoWorker -> [DemandaId] -> IO ()
-reconciliarNoHandshake state widTexto estadoInformado pendentes = do
+reconciliarNoHandshake :: AppState -> WorkerId -> EstadoWorker -> [DemandaId] -> IO ()
+reconciliarNoHandshake state wid estadoInformado pendentes = do
   emAndamento <- listarDemandasEmAndamentoDB (stDb state)
   let executando = case estadoInformado of
-        Ocupada (DemandaId d) -> Just d
+        Ocupada d -> Just d
         Livre -> Nothing
-      comResultadoPendente did = DemandaId did `elem` pendentes
-      orfas = [ did | (did, w, _) <- emAndamento, w == widTexto
-                    , Just did /= executando, not (comResultadoPendente did) ]
+      orfas = [ did | (did, w, _) <- emAndamento, w == wid
+                    , Just did /= executando, did `notElem` pendentes ]
   agora <- getCurrentTime
   forM_ orfas $ \did -> do
-    let motivo = "O worker " <> widTexto <> " reconectou sem esta demanda em execução; o resultado foi perdido."
+    let motivo = "O worker " <> unWorkerId wid <> " reconectou sem esta demanda em execução; o resultado foi perdido."
     marcarDemandaOrfaDB (stDb state) did motivo agora
-    registrar "Reconciliação" $ "Demanda " <> exibirDemanda (DemandaId did) <> " marcada como erro: " <> motivo
+    registrar "Reconciliação" $ "Demanda " <> exibirDemanda did <> " marcada como erro: " <> motivo
 
 -- | Periodicamente marca como ERRO as demandas em andamento cujo worker não está
 -- conectado e não envia heartbeat há mais de 'prazoDemandaOrfa'.
@@ -54,13 +53,13 @@ loopVarreduraOrfas state = forever $ do
     conectados <- atomically $ listarWorkersConectadosSTM state
     let semContato hb = maybe True (\t -> diffUTCTime agora t > prazoDemandaOrfa) hb
         orfas = [ (did, w) | (did, w, hb) <- emAndamento
-                           , WorkerId w `notElem` conectados
+                           , w `notElem` conectados
                            , semContato hb ]
     forM_ orfas $ \(did, w) -> do
-      let motivo = "O worker " <> w <> " ficou sem contato por mais de "
+      let motivo = "O worker " <> unWorkerId w <> " ficou sem contato por mais de "
                    <> T.pack (show (round (prazoDemandaOrfa / 60) :: Int)) <> " min durante o processamento."
       marcarDemandaOrfaDB (stDb state) did motivo agora
-      registrar "Varredura" $ "Demanda " <> exibirDemanda (DemandaId did) <> " marcada como erro: " <> motivo
+      registrar "Varredura" $ "Demanda " <> exibirDemanda did <> " marcada como erro: " <> motivo
   case resultado of
     Left e -> registrar "Varredura" $ "Erro na iteração (laço continua): " <> T.pack (show e)
     Right () -> pure ()

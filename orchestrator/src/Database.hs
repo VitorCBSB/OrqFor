@@ -1,5 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+-- As instâncias ToField/FromField dos tipos do domínio ficam aqui, e não junto
+-- dos tipos no projeto shared, para que o worker não dependa de sqlite-simple.
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Database
   ( DBPool
@@ -22,32 +25,45 @@ import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Data.Aeson (decodeStrict, encode)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time (UTCTime)
 import Database.SQLite.Simple
+import Database.SQLite.Simple.FromField (FromField)
 import Database.SQLite.Simple.FromRow (RowParser)
+import Database.SQLite.Simple.ToField (ToField)
 import Domain.Types
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
+
+-- | Os newtypes do domínio são gravados e lidos como o valor que envolvem.
+deriving newtype instance ToField DemandaId
+deriving newtype instance FromField DemandaId
+deriving newtype instance ToField WorkerId
+deriving newtype instance FromField WorkerId
+deriving newtype instance ToField Email
+deriving newtype instance FromField Email
+deriving newtype instance ToField Matricula
+deriving newtype instance FromField Matricula
+deriving newtype instance ToField CaminhoCompartilhado
+deriving newtype instance FromField CaminhoCompartilhado
 
 type DBPool = MVar Connection
 
 -- | Tipo de leitura para exibir na tabela da interface Web (JOIN de demandas + usuarios + estados)
 data DemandaResumo = DemandaResumo
-  { drId            :: Int64
+  { drId            :: DemandaId
   , drUsuarioNome   :: Text
-  , drMatricula     :: Text
+  , drMatricula     :: Matricula
   , drConfig        :: ConfigProcessamento
   , drSPNum         :: Int
   , drSPAno         :: Int
   , drUrgente       :: Bool
   , drEstadoCodigo  :: Text
   , drEstadoDesc    :: Text
-  , drWorkerId      :: Maybe Text
+  , drWorkerId      :: Maybe WorkerId
   , drMensagemErro  :: Maybe Text
   , drSubmetidaEm   :: UTCTime
   } deriving (Show)
@@ -118,7 +134,7 @@ inserirDemandaDB pool usr@Usuario{..} cfg urgente sp agora = withDB pool $ \conn
       \  nome = excluded.nome, \
       \  matricula = excluded.matricula, \
       \  ultimo_acesso = excluded.ultimo_acesso;"
-      (unEmail usuarioEmail, usuarioNome, unMatricula usuarioMatricula, agora, agora)
+      (usuarioEmail, usuarioNome, usuarioMatricula, agora, agora)
 
     let configJsonTexto = decodeUtf8 (BL.toStrict (encode cfg))
 
@@ -126,7 +142,7 @@ inserirDemandaDB pool usr@Usuario{..} cfg urgente sp agora = withDB pool $ \conn
       "INSERT INTO demandas \
       \  (usuario_email, estado_id, config_json, urgente, sp_numero, sp_ano, submetida_em) \
       \VALUES (?, 1, ?, ?, ?, ?, ?);"
-      ( unEmail usuarioEmail
+      ( usuarioEmail
       , configJsonTexto
       , urgente
       , numero sp
@@ -158,21 +174,21 @@ listarDemandasDB pool = withDB pool $ \conn ->
     \LIMIT 100;"
 
 -- | Verifica se o worker existe na tabela 'workers' e está com ativa = 1
-validarWorkerDB :: DBPool -> Text -> IO Bool
-validarWorkerDB pool workerId = withDB pool $ \conn -> do
+validarWorkerDB :: DBPool -> WorkerId -> IO Bool
+validarWorkerDB pool wid = withDB pool $ \conn -> do
   rows <- query conn
     "SELECT ativa FROM workers WHERE id = ?;"
-    (Only workerId) :: IO [Only Int]
+    (Only wid) :: IO [Only Int]
   case rows of
     [Only 1] -> pure True
     _        -> pure False
 
 -- | Atualiza o timestamp de último contato do worker
-atualizarHeartbeatWorkerDB :: DBPool -> Text -> UTCTime -> IO ()
-atualizarHeartbeatWorkerDB pool workerId agora = withDB pool $ \conn ->
+atualizarHeartbeatWorkerDB :: DBPool -> WorkerId -> UTCTime -> IO ()
+atualizarHeartbeatWorkerDB pool wid agora = withDB pool $ \conn ->
   execute conn
     "UPDATE workers SET ultimo_heartbeat = ? WHERE id = ?;"
-    (agora, workerId)
+    (agora, wid)
 
 -- | Priorize urgentes na fila (urgente = 1 primeiro, depois ordem de chegada por id)
 buscarProximaDemandaFilaDB :: DBPool -> IO (Maybe Demanda)
@@ -189,8 +205,8 @@ buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
       let cfgPadrao = ConfigProcessamento False IPEDDefault
           cfg = fromMaybe cfgPadrao (decodeStrict (encodeUtf8 cfgTxt))
       pure $ Just Demanda
-        { demandaId          = DemandaId did
-        , demandaSolicitante = Usuario unome (Matricula umat) (Email uemail)
+        { demandaId          = did
+        , demandaSolicitante = Usuario unome umat uemail
         , demandaConfig      = cfg
         , demandaSP          = SolicitacaoPericial spNum spAno
         , demandaUrgente     = urg
@@ -199,7 +215,7 @@ buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
     _ -> pure Nothing
 
 -- | Marca a demanda como alocada (estado 2 = INICIALIZANDO) e registra o worker
-atribuirDemandaWorkerDB :: DBPool -> Int64 -> Text -> UTCTime -> IO ()
+atribuirDemandaWorkerDB :: DBPool -> DemandaId -> WorkerId -> UTCTime -> IO ()
 atribuirDemandaWorkerDB pool did wid agora = withDB pool $ \conn ->
   execute conn
     "UPDATE demandas SET worker_id = ?, estado_id = 2, iniciada_em = ? WHERE id = ?;"
@@ -207,14 +223,15 @@ atribuirDemandaWorkerDB pool did wid agora = withDB pool $ \conn ->
 
 -- | Desfaz a atribuição de uma demanda que não chegou ao worker, devolvendo-a
 -- para NA_FILA. Só age se ela ainda estiver em INICIALIZANDO (estado 2).
-devolverDemandaParaFilaDB :: DBPool -> Int64 -> IO ()
+devolverDemandaParaFilaDB :: DBPool -> DemandaId -> IO ()
 devolverDemandaParaFilaDB pool did = withDB pool $ \conn ->
   execute conn
     "UPDATE demandas SET worker_id = NULL, estado_id = 1, iniciada_em = NULL WHERE id = ? AND estado_id = 2;"
     (Only did)
+
 -- | Demandas em andamento (estados 2, 3 e 4) com o worker atribuído e o último
 -- heartbeat desse worker: (id da demanda, id do worker, último heartbeat).
-listarDemandasEmAndamentoDB :: DBPool -> IO [(Int64, Text, Maybe UTCTime)]
+listarDemandasEmAndamentoDB :: DBPool -> IO [(DemandaId, WorkerId, Maybe UTCTime)]
 listarDemandasEmAndamentoDB pool = withDB pool $ \conn ->
   query_ conn
     "SELECT d.id, d.worker_id, w.ultimo_heartbeat \
@@ -225,7 +242,7 @@ listarDemandasEmAndamentoDB pool = withDB pool $ \conn ->
 -- | Marca como ERRO uma demanda órfã (o worker perdeu a demanda ou sumiu).
 -- Só age se ela ainda estiver em andamento, para não sobrescrever um resultado
 -- que tenha chegado nesse meio-tempo.
-marcarDemandaOrfaDB :: DBPool -> Int64 -> Text -> UTCTime -> IO ()
+marcarDemandaOrfaDB :: DBPool -> DemandaId -> Text -> UTCTime -> IO ()
 marcarDemandaOrfaDB pool did motivo agora = withDB pool $ \conn ->
   execute conn
     "UPDATE demandas SET estado_id = 6, mensagem_erro = ?, concluida_em = ? \
@@ -233,20 +250,20 @@ marcarDemandaOrfaDB pool did motivo agora = withDB pool $ \conn ->
     (motivo, agora, did)
 
 -- | Atualiza apenas a etapa atual da demanda no banco
-atualizarEtapaDemandaDB :: DBPool -> Int64 -> EtapaProcessamento -> IO ()
+atualizarEtapaDemandaDB :: DBPool -> DemandaId -> EtapaProcessamento -> IO ()
 atualizarEtapaDemandaDB pool did etapa = withDB pool $ \conn ->
   execute conn
     "UPDATE demandas SET estado_id = ? WHERE id = ?;"
     (etapaParaId etapa, did)
 
 -- | Atualiza o estado final (5 = FINALIZADO, 6 = ERRO)
-finalizarDemandaDB 
-  :: DBPool 
-  -> Int64 
+finalizarDemandaDB
+  :: DBPool
+  -> DemandaId
   -> EtapaProcessamento
-  -> Maybe Text 
-  -> Maybe Text 
-  -> UTCTime 
+  -> Maybe CaminhoCompartilhado
+  -> Maybe Text
+  -> UTCTime
   -> IO ()
 finalizarDemandaDB pool did etapaFinal saida erro agora = withDB pool $ \conn ->
   execute conn
