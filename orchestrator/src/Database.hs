@@ -329,12 +329,17 @@ marcarDemandaOrfaDB pool did motivo agora = withDB pool $ \conn -> do
       \WHERE id = ? AND " <> condicao <> ";" )
     ([toField EstadoErro, toField motivo, toField agora, toField did] <> parametrosEstado)
 
--- | Atualiza apenas a etapa atual da demanda no banco
-atualizarEtapaDemandaDB :: DBPool -> DemandaId -> EtapaProcessamento -> IO ()
-atualizarEtapaDemandaDB pool did etapa = withDB pool $ \conn ->
+-- | Atualiza a etapa atual da demanda no banco. Só age se ela ainda estiver em
+-- execução: uma atualização que chegue atrasada, depois de a demanda ter sido
+-- finalizada ou marcada como órfã, não a faz voltar a "em execução".
+-- Devolve False se a atualização foi ignorada.
+atualizarEtapaDemandaDB :: DBPool -> DemandaId -> EtapaProcessamento -> IO Bool
+atualizarEtapaDemandaDB pool did etapa = withDB pool $ \conn -> do
+  let (condicao, parametrosEstado) = estadoEm "estado_id" estadosEmExecucao
   execute conn
-    "UPDATE demandas SET estado_id = ? WHERE id = ?;"
-    (estadoDaEtapa etapa, did)
+    ( "UPDATE demandas SET estado_id = ? WHERE id = ? AND " <> condicao <> ";" )
+    ([toField (estadoDaEtapa etapa), toField did] <> parametrosEstado)
+  (> 0) <$> changes conn
 
 -- | Marca a demanda como FINALIZADO, com o caminho da saída.
 concluirDemandaDB :: DBPool -> DemandaId -> CaminhoCompartilhado -> UTCTime -> IO ()

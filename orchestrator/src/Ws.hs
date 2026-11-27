@@ -140,8 +140,12 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
         Right (DemandaAceita did) ->
           atomically $ confirmarDemandaSTM state wid did
         Right (AtualizacaoEtapa did etapa) -> do
-          atualizarEtapaDemandaDB (stDb state) did etapa
-          registrar "WS" $ widTexto <> " atualizou demanda " <> exibirDemanda did <> " -> " <> T.pack (show etapa)
+          aplicada <- atualizarEtapaDemandaDB (stDb state) did etapa
+          registrar "WS" $
+            if aplicada
+              then widTexto <> " atualizou demanda " <> exibirDemanda did <> " -> " <> T.pack (show etapa)
+              else widTexto <> " informou a etapa " <> T.pack (show etapa) <> " para a demanda "
+                     <> exibirDemanda did <> ", que não está em execução; ignorada."
 
         Right (DemandaConcluida did saida) -> do
           agora <- getCurrentTime
