@@ -6,7 +6,7 @@ module Sessao
   ) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
-import Control.Concurrent.STM (atomically, readTVarIO, writeTVar)
+import Control.Concurrent.STM (atomically, writeTVar)
 import qualified Control.Exception as EX
 import Control.Monad (forM_, forever, void)
 import qualified Data.Aeson as Aeson
@@ -23,6 +23,7 @@ import Domain.Types
 import Execucao (executarScriptTeste)
 import Log (exibirDemanda, registrar)
 import Pendentes (listarPendentes, removerPendente)
+import SessaoGrafica (SituacaoSessao (..))
 import Util (tentar)
 
 -- | Conecta ao orquestrador e reconecta indefinidamente. A espera dobra a cada
@@ -53,7 +54,7 @@ manterConexao amb = loop esperaInicial
 -- aceite propagam como exceção.
 sessao :: Ambiente -> WS.Connection -> IO Bool
 sessao amb conn = do
-  estadoAtual <- readTVarIO (ambEstado amb)
+  estadoAtual <- estadoParaInformar amb
   pendentes <- listarPendentes (ambDirPendentes amb)
   WS.sendTextData conn (Aeson.encode (HandshakeWorker (ambWorkerId amb) estadoAtual (map fst pendentes)))
   mResposta <- timeout 10000000 (WS.receiveData conn :: IO BL.ByteString)
@@ -61,11 +62,11 @@ sessao amb conn = do
     Just HandshakeAceito -> do
       registrar "Conexão" "Handshake aceito pelo orquestrador."
       atomically $ writeTVar (ambConexao amb) (Just conn)
-      -- Heartbeat em background reportando o estado real do TVar
+      -- Heartbeat em background. O estado é decidido e enviado dentro da trava
+      -- (ver 'comTravaDeEstado').
       hb <- forkIO $ void $ tentar $ forever $ do
         threadDelay (intervaloHeartbeatSegundos * 1000000)
-        est <- readTVarIO (ambEstado amb)
-        WS.sendTextData conn (Aeson.encode (HeartbeatWorker est))
+        informarEstado conn
       resultado <- tentar (reenviarPendentes pendentes >> comandos conn) `EX.finally` do
         killThread hb
         atomically $ writeTVar (ambConexao amb) Nothing
@@ -82,6 +83,10 @@ sessao amb conn = do
       WS.sendClose conn ("Saindo" :: T.Text)
       pure False
   where
+    informarEstado c = comTravaDeEstado amb $ do
+      est <- estadoParaInformar amb
+      WS.sendTextData c (Aeson.encode (HeartbeatWorker est))
+
     reenviarPendentes pendentes =
       forM_ pendentes $ \(did, msg) -> do
         registrar "Pendentes" $ "Reenviando resultado da demanda " <> exibirDemanda did
@@ -92,20 +97,32 @@ sessao amb conn = do
       cmdRaw <- WS.receiveData c :: IO BL.ByteString
       case Aeson.decode cmdRaw of
         Just (IniciarDemanda demanda) -> do
-          registrar "Comando" $ "Recebida demanda " <> exibirDemanda (demandaId demanda)
-          -- Marca Ocupada ANTES de criar a thread e confirma o recebimento ao
-          -- orquestrador, para que heartbeats seguintes nunca informem Livre
-          -- com uma demanda em mãos.
-          atomically $ writeTVar (ambEstado amb) (Ocupada (demandaId demanda))
-          WS.sendTextData c (Aeson.encode (DemandaAceita (demandaId demanda)))
-          -- Roda em thread separada para não bloquear o recebimento de outras mensagens WS
-          void $ forkIO $ executarScriptTeste amb demanda
+          let did = demandaId demanda
+          registrar "Comando" $ "Recebida demanda " <> exibirDemanda did
+          -- A sessão pode ter ficado inutilizável depois do último heartbeat.
+          -- A decisão e a marcação de Ocupada ficam dentro da trava, para que
+          -- nenhum heartbeat com estado anterior seja enviado depois da resposta.
+          situacao <- comTravaDeEstado amb $ do
+            s <- atualizarSituacaoSessao amb
+            case s of
+              SessaoUtilizavel -> atomically $ writeTVar (ambEstado amb) (Ocupada did)
+              SessaoInutilizavel _ -> pure ()
+            pure s
+          case situacao of
+            SessaoUtilizavel -> do
+              -- A execução começa antes da confirmação: se o envio falhar (conexão
+              -- caindo), a demanda continua sendo executada e o resultado é
+              -- reenviado depois (ver módulo "Pendentes").
+              void $ forkIO $ executarScriptTeste amb demanda
+              WS.sendTextData c (Aeson.encode (DemandaAceita did))
+            SessaoInutilizavel motivo -> do
+              registrar "Comando" $ "Demanda " <> exibirDemanda did <> " recusada: " <> motivo
+              WS.sendTextData c (Aeson.encode (DemandaRecusada did motivo))
         Just (ResultadoRegistrado did) ->
           removerPendente (ambDirPendentes amb) did
         Just (CancelarDemanda did) ->
           registrar "Comando" $ "Cancelamento solicitado para a demanda " <> exibirDemanda did
-        Just SolicitarEstado -> do
-          est <- readTVarIO (ambEstado amb)
-          WS.sendTextData c (Aeson.encode (HeartbeatWorker est))
+        Just SolicitarEstado ->
+          informarEstado c
         _ ->
           registrar "Comando" $ "Mensagem inesperada recebida do orquestrador: " <> T.pack (show cmdRaw)

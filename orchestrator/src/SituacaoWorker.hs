@@ -8,29 +8,34 @@ module SituacaoWorker
   , aoDespachar
   , aoCancelarDespacho
   , aoConfirmarDemanda
+  , aoRecusarDemanda
   , aoReceberHeartbeat
   , aoReceberResultado
   ) where
+
+import Data.Text (Text)
 
 import Domain.Types (DemandaId, EstadoWorker (..))
 
 data SituacaoWorker = SituacaoWorker
   { swEstado :: EstadoWorker
   , swConfirmada :: Bool
-    -- ^ False entre o despacho de uma demanda e o 'DemandaAceita' do worker.
-    -- Enquanto for False, heartbeats com estado Livre são antigos (enviados
-    -- antes de o worker receber a demanda) e devem ser ignorados.
+    -- ^ False entre o despacho de uma demanda e a resposta do worker a ela
+    -- ('DemandaAceita' ou 'DemandaRecusada'). Enquanto for False, heartbeats que
+    -- não informam Ocupada foram enviados antes de o worker receber a demanda e
+    -- devem ser ignorados.
   } deriving (Show, Eq)
 
 -- | Situação de um worker recém-conectado, com o estado informado no handshake.
 situacaoInicial :: EstadoWorker -> SituacaoWorker
 situacaoInicial estado = SituacaoWorker estado True
 
+-- | Só um worker Livre recebe demandas (Indisponivel e Ocupada não).
 estaLivre :: SituacaoWorker -> Bool
 estaLivre s = swEstado s == Livre
 
 -- | Reserva o worker para uma demanda que acabou de ser despachada. Até o worker
--- confirmar o recebimento, a reserva não é considerada confirmada.
+-- responder, a reserva não é considerada confirmada.
 aoDespachar :: DemandaId -> SituacaoWorker -> SituacaoWorker
 aoDespachar did _ = SituacaoWorker (Ocupada did) False
 
@@ -45,13 +50,24 @@ aoConfirmarDemanda did s
   | swEstado s == Ocupada did = s { swConfirmada = True }
   | otherwise = s
 
--- | Aplica o estado informado em um heartbeat. Se uma demanda foi despachada e
--- ainda não confirmada, um heartbeat Livre é anterior ao recebimento dela pelo
--- worker e é descartado, para não liberar o worker indevidamente.
+-- | O worker recusou a demanda por não poder executá-la. Ele passa a constar
+-- como indisponível, com o motivo, até o próximo heartbeat dizer o contrário.
+aoRecusarDemanda :: DemandaId -> Text -> SituacaoWorker -> SituacaoWorker
+aoRecusarDemanda did motivo s
+  | swEstado s == Ocupada did = SituacaoWorker (Indisponivel motivo) True
+  | otherwise = s
+
+-- | Aplica o estado informado em um heartbeat. Se uma demanda foi despachada e o
+-- worker ainda não respondeu, um heartbeat que não diz Ocupada é anterior ao
+-- recebimento dela e é descartado, para não liberar o worker indevidamente nem
+-- apagar a reserva.
 aoReceberHeartbeat :: EstadoWorker -> SituacaoWorker -> SituacaoWorker
 aoReceberHeartbeat estadoInformado s
-  | not (swConfirmada s), estadoInformado == Livre = s
+  | not (swConfirmada s), not (ocupado estadoInformado) = s
   | otherwise = SituacaoWorker estadoInformado True
+  where
+    ocupado (Ocupada _) = True
+    ocupado _ = False
 
 -- | Chegou o resultado final de uma demanda. O worker só é liberado se estiver
 -- ocupado com essa mesma demanda: um resultado reenviado após reconexão pode

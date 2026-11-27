@@ -9,7 +9,7 @@ import System.Exit (exitFailure)
 import System.FilePath (takeDirectory, (</>))
 import System.IO (BufferMode (LineBuffering), hSetBuffering, hSetEncoding, stderr, stdout, utf8)
 
-import Ambiente (novoAmbiente)
+import Ambiente (atualizarSituacaoSessao, novoAmbiente)
 import ConfigWorker (carregarConfig)
 import Log (registrar)
 import Sessao (manterConexao)
@@ -44,4 +44,7 @@ main = do
   let dirPendentes = dirExecutavel </> "resultados-pendentes"
   createDirectoryIfMissing True dirPendentes
   amb <- novoAmbiente cfg dirPendentes
+  -- Registra já na inicialização se a sessão permite automação, para facilitar
+  -- o diagnóstico de uma instalação mesmo sem o orquestrador no ar.
+  _ <- atualizarSituacaoSessao amb
   manterConexao amb

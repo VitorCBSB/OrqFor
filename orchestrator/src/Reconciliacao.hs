@@ -41,9 +41,11 @@ orfasNoHandshake wid estadoInformado pendentes emExecucao =
   , did `notElem` pendentes
   ]
   where
+    -- Livre e Indisponivel: o worker não está executando nada
     executando = case estadoInformado of
       Ocupada d -> Just d
       Livre -> Nothing
+      Indisponivel _ -> Nothing
 
 -- | Demandas em execução cujo worker não está conectado e não envia heartbeat
 -- há mais de 'prazoDemandaOrfa' (ou nunca enviou).

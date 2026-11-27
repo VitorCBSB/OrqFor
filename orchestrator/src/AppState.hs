@@ -11,11 +11,13 @@ module AppState
   , cancelarDespachoSTM
   , aplicarHeartbeatSTM
   , confirmarDemandaSTM
+  , recusarDemandaSTM
   , liberarWorkerSTM
   , listarWorkersConectadosSTM
   ) where
 
 import Control.Concurrent.STM
+import Data.Text (Text)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Unique (Unique)
@@ -74,11 +76,23 @@ reservarWorkerLivreSTM st did = do
 cancelarDespachoSTM :: AppState -> WorkerId -> STM ()
 cancelarDespachoSTM st wid = ajustarSituacao st wid aoCancelarDespacho
 
-aplicarHeartbeatSTM :: AppState -> WorkerId -> EstadoWorker -> STM ()
-aplicarHeartbeatSTM st wid estado = ajustarSituacao st wid (aoReceberHeartbeat estado)
+-- | Aplica um heartbeat e devolve o estado do worker antes e depois dele
+-- (Nothing se o worker não está mais registrado).
+aplicarHeartbeatSTM :: AppState -> WorkerId -> EstadoWorker -> STM (Maybe (EstadoWorker, EstadoWorker))
+aplicarHeartbeatSTM st wid estado = do
+  mapa <- readTVar (stWorkersAtivos st)
+  case Map.lookup wid mapa of
+    Nothing -> pure Nothing
+    Just cw -> do
+      let depois = aoReceberHeartbeat estado (cwSituacao cw)
+      writeTVar (stWorkersAtivos st) (Map.insert wid cw { cwSituacao = depois } mapa)
+      pure (Just (swEstado (cwSituacao cw), swEstado depois))
 
 confirmarDemandaSTM :: AppState -> WorkerId -> DemandaId -> STM ()
 confirmarDemandaSTM st wid did = ajustarSituacao st wid (aoConfirmarDemanda did)
+
+recusarDemandaSTM :: AppState -> WorkerId -> DemandaId -> Text -> STM ()
+recusarDemandaSTM st wid did motivo = ajustarSituacao st wid (aoRecusarDemanda did motivo)
 
 liberarWorkerSTM :: AppState -> WorkerId -> DemandaId -> STM ()
 liberarWorkerSTM st wid did = ajustarSituacao st wid (aoReceberResultado did)

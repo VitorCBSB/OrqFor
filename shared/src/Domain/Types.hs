@@ -80,6 +80,9 @@ instance FromJSON EtapaProcessamento
 data EstadoWorker
   = Livre
   | Ocupada DemandaId
+  | Indisponivel Text
+    -- ^ A sessão gráfica da máquina não permite automação (ex.: tela bloqueada,
+    -- sessão desconectada). O texto explica o motivo. O worker não recebe demandas.
   deriving stock (Show, Eq, Generic)
 
 instance ToJSON EstadoWorker

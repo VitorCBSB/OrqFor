@@ -36,3 +36,4 @@ exibirDemanda (DemandaId n) = "#" <> T.pack (show n)
 exibirEstado :: EstadoWorker -> Text
 exibirEstado Livre = "Livre"
 exibirEstado (Ocupada did) = "Ocupada com a demanda " <> exibirDemanda did
+exibirEstado (Indisponivel motivo) = "Indisponível (" <> motivo <> ")"

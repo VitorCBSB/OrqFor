@@ -48,6 +48,13 @@ data MsgDoWorker
       { dfDemandaId :: DemandaId
       , dfMotivo    :: Text -- Ex: "Timeout no IPED". A demanda sempre vai para ERRO.
       }
+  | DemandaRecusada
+      -- ^ Resposta a 'IniciarDemanda' quando o worker não pode executar a demanda
+      -- (ex.: a sessão gráfica ficou inutilizável). Nada foi executado; a demanda
+      -- volta para a fila.
+      { rcDemandaId :: DemandaId
+      , rcMotivo    :: Text
+      }
   deriving stock (Show, Eq, Generic)
 
 instance ToJSON MsgDoWorker

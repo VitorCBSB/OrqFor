@@ -27,6 +27,7 @@ import Database
   ( atualizarEtapaDemandaDB
   , atualizarHeartbeatWorkerDB
   , concluirDemandaDB
+  , devolverDemandaParaFilaDB
   , registrarFalhaDemandaDB
   , validarWorkerDB
   )
@@ -135,7 +136,14 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
         Right (HeartbeatWorker estadoAtual) -> do
           agora <- getCurrentTime
           atualizarHeartbeatWorkerDB (stDb state) wid agora
-          atomically $ aplicarHeartbeatSTM state wid estadoAtual
+          mudanca <- atomically $ aplicarHeartbeatSTM state wid estadoAtual
+          -- Registra só quando o worker passa a ficar ou deixa de ficar indisponível
+          case mudanca of
+            Just (antes, depois@(Indisponivel _)) | not (indisponivel antes) ->
+              registrar "WS" $ widTexto <> " ficou indisponível: " <> exibirEstado depois
+            Just (Indisponivel _, depois) | not (indisponivel depois) ->
+              registrar "WS" $ widTexto <> " voltou a ficar disponível: " <> exibirEstado depois
+            _ -> pure ()
 
         Right (DemandaAceita did) ->
           atomically $ confirmarDemandaSTM state wid did
@@ -154,6 +162,14 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
           registrar "WS" $ widTexto <> " concluiu demanda " <> exibirDemanda did <> " em " <> unCaminho saida
           confirmarResultado did
 
+        Right (DemandaRecusada did motivo) -> do
+          -- Nada foi executado: a demanda volta para a fila e o worker passa a
+          -- constar como indisponível, para não recebê-la de novo.
+          devolverDemandaParaFilaDB (stDb state) did
+          atomically $ recusarDemandaSTM state wid did motivo
+          registrar "WS" $ widTexto <> " recusou a demanda " <> exibirDemanda did
+            <> " (devolvida à fila): " <> motivo
+
         Right (DemandaFalhou did motivo) -> do
           agora <- getCurrentTime
           registrarFalhaDemandaDB (stDb state) did motivo agora
@@ -170,6 +186,10 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
       case r of
         Left e -> registrar "WS" $ "Falha ao confirmar resultado a " <> widTexto <> ": " <> T.pack (show e)
         Right () -> pure ()
+
+indisponivel :: EstadoWorker -> Bool
+indisponivel (Indisponivel _) = True
+indisponivel _ = False
 
 -- | Primeiros 200 bytes de uma mensagem, para log (sem despejar mensagens enormes).
 trechoMensagem :: BL.ByteString -> T.Text
