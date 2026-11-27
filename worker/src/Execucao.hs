@@ -12,6 +12,7 @@ import System.Exit (ExitCode (..))
 import System.Process (proc, readCreateProcessWithExitCode)
 
 import Ambiente
+import ConfigWorker (ConfigWorker (..))
 import Domain.Protocol
 import Domain.Types
 import Log (registrar)
@@ -22,10 +23,8 @@ import Util (tentar)
 executarScriptTeste :: Ambiente -> Demanda -> IO ()
 executarScriptTeste amb demanda = do
   let did = demandaId demanda
-      caminhoAHK = "C:\\Users\\PA\\Desktop\\PA_Auto\\test.ahk"
-      -- Se o AutoHotkey.exe não estiver no PATH do Windows, use o caminho completo:
-      -- ex: "C:\\Program Files\\AutoHotkey\\v2\\AutoHotkey64.exe"
-      executavelAHK = "C:\\Users\\PA\\Desktop\\PA_Auto\\deps\\AutoHotKey\\AutoHotkey64.exe"
+      caminhoAHK = cfgScriptAutoHotkey (ambConfig amb)
+      executavelAHK = cfgAutoHotkey (ambConfig amb)
       -- Grava em disco antes de enviar, para o resultado sobreviver a uma queda
       -- de conexão (ver módulo 'Pendentes').
       reportar msg = do

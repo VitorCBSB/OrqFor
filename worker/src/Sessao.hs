@@ -16,6 +16,7 @@ import qualified Network.WebSockets as WS
 import System.Timeout (timeout)
 
 import Ambiente
+import ConfigWorker (ConfigWorker (..))
 import Configuracao (caminhoWebSocket, intervaloHeartbeatSegundos, portaOrquestrador)
 import Domain.Protocol
 import Domain.Types
@@ -27,12 +28,13 @@ import Util (tentar)
 -- | Conecta ao orquestrador e reconecta indefinidamente. A espera dobra a cada
 -- falha (até 'esperaMaxima') e volta ao valor inicial depois de uma sessão
 -- aceita pelo orquestrador.
-manterConexao :: String -> Ambiente -> IO ()
-manterConexao host amb = loop esperaInicial
+manterConexao :: Ambiente -> IO ()
+manterConexao amb = loop esperaInicial
   where
     esperaInicial = 2 :: Int
     esperaMaxima = 60 :: Int
     widTexto = unWorkerId (ambWorkerId amb)
+    host = cfgOrquestrador (ambConfig amb)
     loop espera = do
       registrar "Conexão" $ "Conectando ao orquestrador em " <> T.pack host <> ":" <> T.pack (show portaOrquestrador) <> " como " <> widTexto <> "..."
       r <- tentar (WS.runClient host portaOrquestrador caminhoWebSocket (sessao amb))

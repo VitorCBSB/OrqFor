@@ -9,6 +9,7 @@ executable worker
     hs-source-dirs: app, src
     other-modules:
         Ambiente
+        ConfigWorker
         Execucao
         Pendentes
         Sessao

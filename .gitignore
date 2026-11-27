@@ -39,3 +39,5 @@ config.local.*
 .DS_Store
 Thumbs.db
 desktop.ini
+# Configuração de cada máquina worker (modelo em worker/worker.exemplo.json)
+worker/worker.json

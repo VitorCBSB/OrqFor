@@ -4,6 +4,7 @@
 module Ambiente
   ( Ambiente (..)
   , novoAmbiente
+  , ambWorkerId
   , enviarSePossivel
   ) where
 
@@ -12,13 +13,14 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Text as T
 import qualified Network.WebSockets as WS
 
+import ConfigWorker (ConfigWorker (..))
 import Domain.Protocol (MsgDoWorker)
 import Domain.Types (EstadoWorker (..), WorkerId)
 import Log (registrar)
 import Util (tentar)
 
 data Ambiente = Ambiente
-  { ambWorkerId :: WorkerId
+  { ambConfig :: ConfigWorker
   , ambDirPendentes :: FilePath
     -- ^ Pasta dos resultados ainda não confirmados pelo orquestrador.
   , ambEstado :: TVar EstadoWorker
@@ -27,8 +29,11 @@ data Ambiente = Ambiente
   }
 
 -- | Ambiente inicial: worker Livre e sem conexão.
-novoAmbiente :: WorkerId -> FilePath -> IO Ambiente
-novoAmbiente wid dir = Ambiente wid dir <$> newTVarIO Livre <*> newTVarIO Nothing
+novoAmbiente :: ConfigWorker -> FilePath -> IO Ambiente
+novoAmbiente cfg dir = Ambiente cfg dir <$> newTVarIO Livre <*> newTVarIO Nothing
+
+ambWorkerId :: Ambiente -> WorkerId
+ambWorkerId = cfgWorkerId . ambConfig
 
 -- | Envia uma mensagem pela conexão atual, se houver. Como a conexão pode ser
 -- trocada por uma reconexão durante a execução de uma demanda, quem executa
