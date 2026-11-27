@@ -18,13 +18,16 @@ module Database
   , listarDemandasEmAndamentoDB
   , marcarDemandaOrfaDB
   , atualizarEtapaDemandaDB
-  , finalizarDemandaDB
+  , concluirDemandaDB
+  , registrarFalhaDemandaDB
   ) where
 
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Monad (when)
 import Data.Aeson (decodeStrict, encode)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
+import Data.List (sortOn)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -35,6 +38,7 @@ import Database.SQLite.Simple.FromField (FromField)
 import Database.SQLite.Simple.FromRow (RowParser)
 import Database.SQLite.Simple.ToField (ToField, toField)
 import Domain.Types
+import EstadoDemanda
 import Filtro (FiltroDemandas (..), Situacao (..))
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
@@ -105,7 +109,26 @@ inicializarBanco caminhoDB caminhoSchema = do
   execute_ conn "PRAGMA busy_timeout = 5000;"
 
   executarArquivoSQL conn caminhoSchema
+  verificarEstados conn
   newMVar conn
+
+-- | Confere se a tabela @estados_processamento@ corresponde ao mapeamento de
+-- "EstadoDemanda". Se não corresponder (ex.: o schema.sql mudou e o código não),
+-- a inicialização falha, em vez de o orquestrador gravar estados errados.
+verificarEstados :: Connection -> IO ()
+verificarEstados conn = do
+  encontrados <- query_ conn "SELECT id, codigo FROM estados_processamento ORDER BY id;" :: IO [(Int, Text)]
+  let esperados = sortOn fst [ (idEstado e, codigoEstado e) | e <- [minBound .. maxBound] ]
+  when (encontrados /= esperados) $
+    ioError $ userError $
+      "A tabela estados_processamento não corresponde ao tipo EstadoDemanda. Esperado: "
+        <> show esperados <> "; encontrado no banco: " <> show encontrados
+
+-- | Condição @coluna IN (?, ?, ...)@ para uma lista de estados, com os parâmetros.
+estadoEm :: Query -> [EstadoDemanda] -> (Query, [SQLData])
+estadoEm coluna estados =
+  ( coluna <> " IN (" <> Query (T.intercalate ", " (map (const "?") estados)) <> ")"
+  , map toField estados )
 
 -- | Lê um arquivo .sql e executa cada instrução separada por ';'
 executarArquivoSQL :: Connection -> FilePath -> IO ()
@@ -116,7 +139,7 @@ executarArquivoSQL conn caminhoSQL = do
   withTransaction conn $
     mapM_ (\cmd -> execute_ conn (Query cmd)) comandos
 
--- | Insere/atualiza o solicitante e grava a nova demanda com estado inicial 1 (NA_FILA)
+-- | Insere/atualiza o solicitante e grava a nova demanda na fila
 inserirDemandaDB
   :: DBPool
   -> Usuario
@@ -142,8 +165,9 @@ inserirDemandaDB pool usr@Usuario{..} cfg urgente sp agora = withDB pool $ \conn
     execute conn
       "INSERT INTO demandas \
       \  (usuario_email, estado_id, config_json, urgente, sp_numero, sp_ano, submetida_em) \
-      \VALUES (?, 1, ?, ?, ?, ?, ?);"
+      \VALUES (?, ?, ?, ?, ?, ?, ?);"
       ( usuarioEmail
+      , EstadoNaFila
       , configJsonTexto
       , urgente
       , numero sp
@@ -211,12 +235,12 @@ clausulaFiltro (FiltroDemandas busca situacao somenteUrgentes)
                     \OR (d.sp_numero || '/' || d.sp_ano) LIKE ? ESCAPE '\\')"
                   , [padrao, padrao, padrao] )
 
-    condSituacao = case situacao of
-      Todas       -> Nothing
-      EmAndamento -> Just ("d.estado_id IN (1, 2, 3, 4)", [])
-      Enfileiradas -> Just ("d.estado_id = 1", [])
-      Concluidas  -> Just ("d.estado_id = 5", [])
-      ComErro     -> Just ("d.estado_id = 6", [])
+    condSituacao = estadoEm "d.estado_id" <$> case situacao of
+      Todas        -> Nothing
+      EmAndamento  -> Just estadosNaoConcluidos
+      Enfileiradas -> Just [EstadoNaFila]
+      Concluidas   -> Just [EstadoFinalizado]
+      ComErro      -> Just [EstadoErro]
 
     condUrgente
       | somenteUrgentes = Just ("d.urgente = 1", [])
@@ -245,13 +269,14 @@ atualizarHeartbeatWorkerDB pool wid agora = withDB pool $ \conn ->
 -- | Priorize urgentes na fila (urgente = 1 primeiro, depois ordem de chegada por id)
 buscarProximaDemandaFilaDB :: DBPool -> IO (Maybe Demanda)
 buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
-  rows <- query_ conn
+  rows <- query conn
     "SELECT d.id, u.nome, u.matricula, u.email, d.config_json, d.urgente, d.sp_numero, d.sp_ano, d.submetida_em \
     \FROM demandas d \
     \JOIN usuarios u ON u.email = d.usuario_email \
-    \WHERE d.estado_id = 1 \
+    \WHERE d.estado_id = ? \
     \ORDER BY d.urgente DESC, d.id ASC \
     \LIMIT 1;"
+    (Only EstadoNaFila)
   case rows of
     [(did, unome, umat, uemail, cfgTxt, urg, spNum, spAno, subEm)] -> do
       let cfgPadrao = ConfigProcessamento False IPEDDefault
@@ -266,66 +291,70 @@ buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
         }
     _ -> pure Nothing
 
--- | Marca a demanda como alocada (estado 2 = INICIALIZANDO) e registra o worker
+-- | Marca a demanda como alocada (INICIALIZANDO) e registra o worker
 atribuirDemandaWorkerDB :: DBPool -> DemandaId -> WorkerId -> UTCTime -> IO ()
 atribuirDemandaWorkerDB pool did wid agora = withDB pool $ \conn ->
   execute conn
-    "UPDATE demandas SET worker_id = ?, estado_id = 2, iniciada_em = ? WHERE id = ?;"
-    (wid, agora, did)
+    "UPDATE demandas SET worker_id = ?, estado_id = ?, iniciada_em = ? WHERE id = ?;"
+    (wid, EstadoInicializando, agora, did)
 
 -- | Desfaz a atribuição de uma demanda que não chegou ao worker, devolvendo-a
--- para NA_FILA. Só age se ela ainda estiver em INICIALIZANDO (estado 2).
+-- para NA_FILA. Só age se ela ainda estiver em INICIALIZANDO.
 devolverDemandaParaFilaDB :: DBPool -> DemandaId -> IO ()
 devolverDemandaParaFilaDB pool did = withDB pool $ \conn ->
   execute conn
-    "UPDATE demandas SET worker_id = NULL, estado_id = 1, iniciada_em = NULL WHERE id = ? AND estado_id = 2;"
-    (Only did)
+    "UPDATE demandas SET worker_id = NULL, estado_id = ?, iniciada_em = NULL WHERE id = ? AND estado_id = ?;"
+    (EstadoNaFila, did, EstadoInicializando)
 
--- | Demandas em andamento (estados 2, 3 e 4) com o worker atribuído e o último
+-- | Demandas em execução ('estadosEmExecucao') com o worker atribuído e o último
 -- heartbeat desse worker: (id da demanda, id do worker, último heartbeat).
 listarDemandasEmAndamentoDB :: DBPool -> IO [(DemandaId, WorkerId, Maybe UTCTime)]
-listarDemandasEmAndamentoDB pool = withDB pool $ \conn ->
-  query_ conn
-    "SELECT d.id, d.worker_id, w.ultimo_heartbeat \
-    \FROM demandas d \
-    \JOIN workers w ON w.id = d.worker_id \
-    \WHERE d.estado_id IN (2, 3, 4);"
+listarDemandasEmAndamentoDB pool = withDB pool $ \conn -> do
+  let (condicao, parametros) = estadoEm "d.estado_id" estadosEmExecucao
+  query conn
+    ( "SELECT d.id, d.worker_id, w.ultimo_heartbeat \
+      \FROM demandas d \
+      \JOIN workers w ON w.id = d.worker_id \
+      \WHERE " <> condicao <> ";" )
+    parametros
 
 -- | Marca como ERRO uma demanda órfã (o worker perdeu a demanda ou sumiu).
--- Só age se ela ainda estiver em andamento, para não sobrescrever um resultado
+-- Só age se ela ainda estiver em execução, para não sobrescrever um resultado
 -- que tenha chegado nesse meio-tempo.
 marcarDemandaOrfaDB :: DBPool -> DemandaId -> Text -> UTCTime -> IO ()
-marcarDemandaOrfaDB pool did motivo agora = withDB pool $ \conn ->
+marcarDemandaOrfaDB pool did motivo agora = withDB pool $ \conn -> do
+  let (condicao, parametrosEstado) = estadoEm "estado_id" estadosEmExecucao
   execute conn
-    "UPDATE demandas SET estado_id = 6, mensagem_erro = ?, concluida_em = ? \
-    \WHERE id = ? AND estado_id IN (2, 3, 4);"
-    (motivo, agora, did)
+    ( "UPDATE demandas SET estado_id = ?, mensagem_erro = ?, concluida_em = ? \
+      \WHERE id = ? AND " <> condicao <> ";" )
+    ([toField EstadoErro, toField motivo, toField agora, toField did] <> parametrosEstado)
 
 -- | Atualiza apenas a etapa atual da demanda no banco
 atualizarEtapaDemandaDB :: DBPool -> DemandaId -> EtapaProcessamento -> IO ()
 atualizarEtapaDemandaDB pool did etapa = withDB pool $ \conn ->
   execute conn
     "UPDATE demandas SET estado_id = ? WHERE id = ?;"
-    (etapaParaId etapa, did)
+    (estadoDaEtapa etapa, did)
 
--- | Atualiza o estado final (5 = FINALIZADO, 6 = ERRO)
-finalizarDemandaDB
+-- | Marca a demanda como FINALIZADO, com o caminho da saída.
+concluirDemandaDB :: DBPool -> DemandaId -> CaminhoCompartilhado -> UTCTime -> IO ()
+concluirDemandaDB pool did saida agora =
+  gravarFimDemanda pool did EstadoFinalizado (Just saida) Nothing agora
+
+-- | Marca a demanda como ERRO, com o motivo informado pelo worker.
+registrarFalhaDemandaDB :: DBPool -> DemandaId -> Text -> UTCTime -> IO ()
+registrarFalhaDemandaDB pool did motivo agora =
+  gravarFimDemanda pool did EstadoErro Nothing (Just motivo) agora
+
+gravarFimDemanda
   :: DBPool
   -> DemandaId
-  -> EtapaProcessamento
+  -> EstadoDemanda
   -> Maybe CaminhoCompartilhado
   -> Maybe Text
   -> UTCTime
   -> IO ()
-finalizarDemandaDB pool did etapaFinal saida erro agora = withDB pool $ \conn ->
+gravarFimDemanda pool did estado saida erro agora = withDB pool $ \conn ->
   execute conn
     "UPDATE demandas SET estado_id = ?, caminho_saida = ?, mensagem_erro = ?, concluida_em = ? WHERE id = ?;"
-    (etapaParaId etapaFinal, saida, erro, agora, did)
-
-etapaParaId :: EtapaProcessamento -> Int
-etapaParaId NaFila = 1
-etapaParaId Inicializando = 2
-etapaParaId ExecutandoPA = 3
-etapaParaId ExecutandoIPED = 4
-etapaParaId Finalizado = 5
-etapaParaId (Erro _) = 6
+    (estado, saida, erro, agora, did)

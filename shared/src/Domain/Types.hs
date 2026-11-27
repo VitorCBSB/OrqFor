@@ -64,14 +64,13 @@ data ConfigProcessamento = ConfigProcessamento
 instance ToJSON ConfigProcessamento
 instance FromJSON ConfigProcessamento
 
--- | Etapas reportadas em tempo real pelo Worker Windows
+-- | Etapas reportadas em tempo real pelo Worker Windows durante a execução de uma
+-- demanda ('AtualizacaoEtapa'). O fim da execução não é uma etapa: é informado
+-- pelas mensagens 'DemandaConcluida' e 'DemandaFalhou'.
 data EtapaProcessamento
-  = NaFila
-  | Inicializando
+  = Inicializando
   | ExecutandoPA
   | ExecutandoIPED
-  | Finalizado
-  | Erro Text
   deriving stock (Show, Eq, Generic)
 
 instance ToJSON EtapaProcessamento

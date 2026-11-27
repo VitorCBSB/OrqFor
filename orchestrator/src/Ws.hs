@@ -26,7 +26,8 @@ import Configuracao (caminhoWebSocket, intervaloHeartbeatSegundos)
 import Database
   ( atualizarEtapaDemandaDB
   , atualizarHeartbeatWorkerDB
-  , finalizarDemandaDB
+  , concluirDemandaDB
+  , registrarFalhaDemandaDB
   , validarWorkerDB
   )
 import Domain.Protocol
@@ -144,14 +145,14 @@ loopMensagensWorker state wid@(WorkerId widTexto) conn = do
 
         Right (DemandaConcluida did saida) -> do
           agora <- getCurrentTime
-          finalizarDemandaDB (stDb state) did Finalizado (Just saida) Nothing agora
+          concluirDemandaDB (stDb state) did saida agora
           atomically $ liberarWorkerSTM state wid did
           registrar "WS" $ widTexto <> " concluiu demanda " <> exibirDemanda did <> " em " <> unCaminho saida
           confirmarResultado did
 
         Right (DemandaFalhou did motivo) -> do
           agora <- getCurrentTime
-          finalizarDemandaDB (stDb state) did (Erro motivo) Nothing (Just motivo) agora
+          registrarFalhaDemandaDB (stDb state) did motivo agora
           atomically $ liberarWorkerSTM state wid did
           registrar "WS" $ widTexto <> " falhou na demanda " <> exibirDemanda did <> ": " <> motivo
           confirmarResultado did

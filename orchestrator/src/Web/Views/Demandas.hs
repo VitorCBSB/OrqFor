@@ -60,8 +60,7 @@ barraFiltros (FiltroDemandas busca situacao somenteUrgentes) =
         forM_ [minBound .. maxBound] $ \s ->
           option_ ([value_ (codigoSituacao s)] <> [selected_ "" | s == situacao])
             (toHtml (rotuloSituacao s))
-      label_ $ do
-        campoCheckbox " Somente urgentes" "urgentes" False
+      campoCheckbox "Somente urgentes" "urgentes" somenteUrgentes
 
 fragmentoListaDemandas :: FiltroDemandas -> (Int, [DemandaResumo]) -> Html ()
 fragmentoListaDemandas filtro (_, [])
