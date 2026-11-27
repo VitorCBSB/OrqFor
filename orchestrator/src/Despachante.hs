@@ -16,7 +16,13 @@ import Data.Time (getCurrentTime)
 import qualified Network.WebSockets as WS
 
 import AppState
-import Database (atribuirDemandaWorkerDB, buscarProximaDemandaFilaDB, devolverDemandaParaFilaDB)
+import Database
+  ( ProximaDemanda (..)
+  , atribuirDemandaWorkerDB
+  , buscarProximaDemandaFilaDB
+  , devolverDemandaParaFilaDB
+  , registrarFalhaDemandaDB
+  )
 import Domain.Protocol (MsgParaWorker (IniciarDemanda))
 import Domain.Types
 import Log (exibirDemanda, registrar)
@@ -36,10 +42,19 @@ loopDespachante state = forever $ do
 -- e a envia. Se algo falhar no meio, desfaz o que já foi feito.
 despacharProxima :: AppState -> IO ()
 despacharProxima state = do
-  mDemanda <- buscarProximaDemandaFilaDB (stDb state)
-  case mDemanda of
+  mProxima <- buscarProximaDemandaFilaDB (stDb state)
+  case mProxima of
     Nothing -> pure ()
-    Just demanda -> do
+    -- Sem a configuração não se sabe o perfil nem as opções pedidas. A demanda
+    -- vai para ERRO; se ficasse na fila, seria buscada de novo a cada iteração
+    -- e bloquearia as demais.
+    Just (ConfigIlegivel did erro) -> do
+      agora <- getCurrentTime
+      let motivo = "A configuração gravada da demanda não pôde ser lida (" <> erro
+                   <> "). Submeta a demanda novamente."
+      registrarFalhaDemandaDB (stDb state) did motivo agora
+      registrar "Despachante" $ "Demanda " <> exibirDemanda did <> " marcada como erro: " <> motivo
+    Just (ProximaDemanda demanda) -> do
       let did = demandaId demanda
       -- Reserva o worker no STM para evitar envio duplo
       mWorkerLivre <- atomically $ do

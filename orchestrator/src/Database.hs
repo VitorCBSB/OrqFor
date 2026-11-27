@@ -7,6 +7,7 @@
 module Database
   ( DBPool
   , DemandaResumo (..)
+  , ProximaDemanda (..)
   , inicializarBanco
   , inserirDemandaDB
   , listarDemandasDB
@@ -24,11 +25,11 @@ module Database
 
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Monad (when)
-import Data.Aeson (decodeStrict, encode)
+import Data.Aeson (eitherDecodeStrict, encode)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.List (sortOn)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
@@ -62,7 +63,8 @@ data DemandaResumo = DemandaResumo
   { drId            :: DemandaId
   , drUsuarioNome   :: Text
   , drMatricula     :: Matricula
-  , drConfig        :: ConfigProcessamento
+  , drConfig        :: Either Text ConfigProcessamento
+    -- ^ Left com o erro de decodificação, se o config_json estiver ilegível
   , drSPNum         :: Int
   , drSPAno         :: Int
   , drUrgente       :: Bool
@@ -88,10 +90,19 @@ instance FromRow DemandaResumo where
     drMensagemErro <- field
     drSubmetidaEm  <- field
 
-    let cfgPadrao = ConfigProcessamento False IPEDDefault
-        drConfig  = fromMaybe cfgPadrao (decodeStrict (encodeUtf8 cfgTexto))
+    let drConfig = either (Left . T.pack) Right (decodificarConfig cfgTexto)
 
     pure DemandaResumo{..}
+
+-- | Texto gravado na coluna @config_json@.
+codificarConfig :: ConfigProcessamento -> Text
+codificarConfig = decodeUtf8 . BL.toStrict . encode
+
+-- | Lê a coluna @config_json@. Não há valor padrão: uma configuração ilegível é
+-- um erro, porque processar a demanda com perfil ou opções diferentes dos
+-- pedidos, sem ninguém perceber, é pior do que uma falha visível.
+decodificarConfig :: Text -> Either String ConfigProcessamento
+decodificarConfig = eitherDecodeStrict . encodeUtf8
 
 -- | Helper para executar operações no SQLite com exclusão mútua segura entre threads
 withDB :: DBPool -> (Connection -> IO a) -> IO a
@@ -160,15 +171,13 @@ inserirDemandaDB pool usr@Usuario{..} cfg urgente sp agora = withDB pool $ \conn
       \  ultimo_acesso = excluded.ultimo_acesso;"
       (usuarioEmail, usuarioNome, usuarioMatricula, agora, agora)
 
-    let configJsonTexto = decodeUtf8 (BL.toStrict (encode cfg))
-
     execute conn
       "INSERT INTO demandas \
       \  (usuario_email, estado_id, config_json, urgente, sp_numero, sp_ano, submetida_em) \
       \VALUES (?, ?, ?, ?, ?, ?, ?);"
       ( usuarioEmail
       , EstadoNaFila
-      , configJsonTexto
+      , codificarConfig cfg
       , urgente
       , numero sp
       , ano sp
@@ -266,8 +275,15 @@ atualizarHeartbeatWorkerDB pool wid agora = withDB pool $ \conn ->
     "UPDATE workers SET ultimo_heartbeat = ? WHERE id = ?;"
     (agora, wid)
 
+-- | Resultado da busca pela próxima demanda da fila.
+data ProximaDemanda
+  = ProximaDemanda Demanda
+  | ConfigIlegivel DemandaId Text
+    -- ^ O config_json gravado não pôde ser lido (com o erro de decodificação).
+    -- A demanda não pode ser processada sem saber o perfil e as opções pedidas.
+
 -- | Priorize urgentes na fila (urgente = 1 primeiro, depois ordem de chegada por id)
-buscarProximaDemandaFilaDB :: DBPool -> IO (Maybe Demanda)
+buscarProximaDemandaFilaDB :: DBPool -> IO (Maybe ProximaDemanda)
 buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
   rows <- query conn
     "SELECT d.id, u.nome, u.matricula, u.email, d.config_json, d.urgente, d.sp_numero, d.sp_ano, d.submetida_em \
@@ -277,19 +293,19 @@ buscarProximaDemandaFilaDB pool = withDB pool $ \conn -> do
     \ORDER BY d.urgente DESC, d.id ASC \
     \LIMIT 1;"
     (Only EstadoNaFila)
-  case rows of
-    [(did, unome, umat, uemail, cfgTxt, urg, spNum, spAno, subEm)] -> do
-      let cfgPadrao = ConfigProcessamento False IPEDDefault
-          cfg = fromMaybe cfgPadrao (decodeStrict (encodeUtf8 cfgTxt))
-      pure $ Just Demanda
-        { demandaId          = did
-        , demandaSolicitante = Usuario unome umat uemail
-        , demandaConfig      = cfg
-        , demandaSP          = SolicitacaoPericial spNum spAno
-        , demandaUrgente     = urg
-        , demandaCriadaEm    = subEm
-        }
-    _ -> pure Nothing
+  pure $ case rows of
+    [(did, unome, umat, uemail, cfgTxt, urg, spNum, spAno, subEm)] -> Just $
+      case decodificarConfig cfgTxt of
+        Left erro -> ConfigIlegivel did (T.pack erro)
+        Right cfg -> ProximaDemanda Demanda
+          { demandaId          = did
+          , demandaSolicitante = Usuario unome umat uemail
+          , demandaConfig      = cfg
+          , demandaSP          = SolicitacaoPericial spNum spAno
+          , demandaUrgente     = urg
+          , demandaCriadaEm    = subEm
+          }
+    _ -> Nothing
 
 -- | Marca a demanda como alocada (INICIALIZANDO) e registra o worker
 atribuirDemandaWorkerDB :: DBPool -> DemandaId -> WorkerId -> UTCTime -> IO ()
